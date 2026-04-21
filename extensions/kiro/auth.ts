@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@mariozechner/pi-ai";
 
+import { logKiroError, sanitizeKiroLogString, type KiroLoggingDependencies } from "./logging";
 import { createKiroRefreshToken } from "./refresh";
 import {
   KIRO_AUTH_MODES,
@@ -87,7 +88,7 @@ export interface ParsedAwsTokenResponse {
   raw: Record<string, unknown>;
 }
 
-export interface KiroLoginDependencies {
+export interface KiroLoginDependencies extends KiroLoggingDependencies {
   fetch?: typeof fetch;
   now?: () => number;
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
@@ -220,7 +221,7 @@ async function readJsonObjectResponse(response: Response, operation: string): Pr
   const responseText = await response.text();
 
   if (!response.ok) {
-    const suffix = responseText ? `: ${responseText}` : "";
+    const suffix = responseText ? `: ${sanitizeKiroLogString(responseText)}` : "";
     throw new Error(`${operation} failed with HTTP ${response.status}${suffix}`);
   }
 
@@ -730,13 +731,13 @@ async function pollForToken(
     }
 
     if (parsed.error === "invalid_response") {
-      throw new Error(`Token exchange failed: ${parsed.errorDescription ?? "invalid AWS response."}`);
+      throw new Error(`Token exchange failed: ${sanitizeKiroLogString(parsed.errorDescription ?? "invalid AWS response.")}`);
     }
 
     if (!response.ok) {
       const reason = parsed.error
-        ? `${parsed.error}${parsed.errorDescription ? ` - ${parsed.errorDescription}` : ""}`
-        : responseText || response.statusText;
+        ? sanitizeKiroLogString(`${parsed.error}${parsed.errorDescription ? ` - ${parsed.errorDescription}` : ""}`)
+        : sanitizeKiroLogString(responseText || response.statusText);
       throw new Error(`Token exchange failed with HTTP ${response.status}: ${reason}`);
     }
 
@@ -748,52 +749,70 @@ async function pollForToken(
 
 export function createKiroLogin(dependencies: KiroLoginDependencies = {}) {
   return async function loginKiro(callbacks: OAuthLoginCallbacks): Promise<KiroOAuthCredentials> {
-    const config = await promptForKiroAuthConfig(callbacks);
-    const runtimeConfig = await getRuntimeConfig(dependencies);
+    let config: NormalizedKiroAuthConfig | undefined;
 
-    callbacks.onProgress?.("Registering the Kiro OIDC client...");
-    const client = await registerOidcClient(config, dependencies);
+    try {
+      config = await promptForKiroAuthConfig(callbacks);
+      const runtimeConfig = await getRuntimeConfig(dependencies);
 
-    callbacks.onProgress?.("Starting AWS device authorization...");
-    const deviceAuthorization = await requestDeviceAuthorization(config, client, dependencies);
+      callbacks.onProgress?.("Registering the Kiro OIDC client...");
+      const client = await registerOidcClient(config, dependencies);
 
-    const browserUrl =
-      config.authMode === KIRO_AUTH_MODES.IDENTITY_CENTER && config.startUrl
-        ? buildIdentityCenterDeviceUrl(config.startUrl, deviceAuthorization.userCode)
-        : getBuilderIdBrowserUrl(
-            deviceAuthorization.verificationUriComplete,
-            deviceAuthorization.verificationUri,
-          );
+      callbacks.onProgress?.("Starting AWS device authorization...");
+      const deviceAuthorization = await requestDeviceAuthorization(config, client, dependencies);
 
-    callbacks.onAuth({
-      url: browserUrl,
-      instructions: getBrowserInstructions(config.authMode, deviceAuthorization.userCode, browserUrl),
-    });
+      const browserUrl =
+        config.authMode === KIRO_AUTH_MODES.IDENTITY_CENTER && config.startUrl
+          ? buildIdentityCenterDeviceUrl(config.startUrl, deviceAuthorization.userCode)
+          : getBuilderIdBrowserUrl(
+              deviceAuthorization.verificationUriComplete,
+              deviceAuthorization.verificationUri,
+            );
 
-    callbacks.onProgress?.("Waiting for the browser login to complete...");
-    const credentials = await pollForToken(
-      config,
-      client,
-      deviceAuthorization.deviceCode,
-      deviceAuthorization.interval,
-      deviceAuthorization.expiresIn,
-      callbacks,
-      dependencies,
-    );
+      callbacks.onAuth({
+        url: browserUrl,
+        instructions: getBrowserInstructions(config.authMode, deviceAuthorization.userCode, browserUrl),
+      });
 
-    return applyKiroProfileArnOverride(credentials, runtimeConfig.profileArn);
+      callbacks.onProgress?.("Waiting for the browser login to complete...");
+      const credentials = await pollForToken(
+        config,
+        client,
+        deviceAuthorization.deviceCode,
+        deviceAuthorization.interval,
+        deviceAuthorization.expiresIn,
+        callbacks,
+        dependencies,
+      );
+
+      return applyKiroProfileArnOverride(credentials, runtimeConfig.profileArn);
+    } catch (error) {
+      await logKiroError(dependencies, "login_error", error, {
+        authMode: config?.authMode,
+        region: config?.region,
+        oidcRegion: config?.oidcRegion,
+        startUrl: config?.startUrl,
+      });
+      throw error;
+    }
   };
 }
 
 function notifyCredentialsUpdated(
   callback: KiroLoginDependencies["onCredentialsUpdated"],
   credentials: KiroOAuthCredentials,
+  dependencies: KiroLoggingDependencies,
 ): void {
   if (!callback) {
     return;
   }
 
-  void Promise.resolve(callback(credentials)).catch(() => undefined);
+  void Promise.resolve(callback(credentials)).catch((error) =>
+    logKiroError(dependencies, "credentials_updated_callback_error", error, {
+      authMode: credentials.authMode,
+      region: credentials.region,
+    }),
+  );
 }
 
 export function createKiroOAuthProviderConfig(dependencies: KiroLoginDependencies = {}) {
@@ -804,12 +823,12 @@ export function createKiroOAuthProviderConfig(dependencies: KiroLoginDependencie
     name: "Kiro",
     async login(callbacks: OAuthLoginCallbacks): Promise<KiroOAuthCredentials> {
       const credentials = await login(callbacks);
-      notifyCredentialsUpdated(dependencies.onCredentialsUpdated, credentials);
+      notifyCredentialsUpdated(dependencies.onCredentialsUpdated, credentials, dependencies);
       return credentials;
     },
     async refreshToken(credentials: OAuthCredentials): Promise<KiroOAuthCredentials> {
       const refreshedCredentials = await refreshToken(credentials);
-      notifyCredentialsUpdated(dependencies.onCredentialsUpdated, refreshedCredentials);
+      notifyCredentialsUpdated(dependencies.onCredentialsUpdated, refreshedCredentials, dependencies);
       return refreshedCredentials;
     },
     getApiKey(credentials: OAuthCredentials): string {

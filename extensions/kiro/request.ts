@@ -10,6 +10,7 @@ import type {
   UserMessage,
 } from "@mariozechner/pi-ai";
 
+import { sanitizeKiroLogString } from "./logging";
 import { KIRO_FALLBACK_MODELS } from "./models";
 import type {
   KiroAssistantResponseMessage,
@@ -526,6 +527,6 @@ export function buildKiroTransportRequest(input: KiroTransportRequestInput): {
 }
 
 export function buildKiroHttpErrorMessage(response: Pick<Response, "status" | "statusText">, bodyText: string): string {
-  const detail = bodyText.trim() || response.statusText || "request failed";
+  const detail = sanitizeKiroLogString(bodyText.trim() || response.statusText || "request failed");
   return `Kiro request failed with HTTP ${response.status}: ${detail}`;
 }

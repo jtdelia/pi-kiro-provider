@@ -224,4 +224,37 @@ describe("kiro token refresh", () => {
       } as KiroOAuthCredentials),
     ).rejects.toThrow("Kiro token refresh failed: socket hang up");
   });
+
+  it("sanitizes secrets in refresh failures before surfacing them", async () => {
+    const refreshToken = createKiroRefreshToken({
+      fetch: createFetchMock([
+        jsonResponse(
+          {
+            message: 'Authorization: Bearer refresh-secret {"access_token":"abc123"}',
+          },
+          { status: 500 },
+        ),
+      ]) as unknown as typeof fetch,
+    });
+
+    let message = "";
+    try {
+      await refreshToken({
+        refresh: "builder-refresh-current",
+        access: "builder-access-current",
+        expires: 1,
+        authMode: KIRO_AUTH_MODES.BUILDER_ID,
+        region: "us-east-1",
+        oidcRegion: "us-east-1",
+        clientId: "builder-client-id",
+        clientSecret: "builder-client-secret",
+      } as KiroOAuthCredentials);
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+
+    expect(message).toContain("[REDACTED]");
+    expect(message).not.toContain("refresh-secret");
+    expect(message).not.toContain("abc123");
+  });
 });
