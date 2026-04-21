@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@mariozechner/pi-ai";
 
-import { logKiroError, type KiroLoggingDependencies } from "./logging";
+import { logKiroError, sanitizeKiroLogString, type KiroLoggingDependencies } from "./logging";
 import { createKiroRefreshToken } from "./refresh";
 import {
   KIRO_AUTH_MODES,
@@ -221,7 +221,7 @@ async function readJsonObjectResponse(response: Response, operation: string): Pr
   const responseText = await response.text();
 
   if (!response.ok) {
-    const suffix = responseText ? `: ${responseText}` : "";
+    const suffix = responseText ? `: ${sanitizeKiroLogString(responseText)}` : "";
     throw new Error(`${operation} failed with HTTP ${response.status}${suffix}`);
   }
 
@@ -731,13 +731,13 @@ async function pollForToken(
     }
 
     if (parsed.error === "invalid_response") {
-      throw new Error(`Token exchange failed: ${parsed.errorDescription ?? "invalid AWS response."}`);
+      throw new Error(`Token exchange failed: ${sanitizeKiroLogString(parsed.errorDescription ?? "invalid AWS response.")}`);
     }
 
     if (!response.ok) {
       const reason = parsed.error
-        ? `${parsed.error}${parsed.errorDescription ? ` - ${parsed.errorDescription}` : ""}`
-        : responseText || response.statusText;
+        ? sanitizeKiroLogString(`${parsed.error}${parsed.errorDescription ? ` - ${parsed.errorDescription}` : ""}`)
+        : sanitizeKiroLogString(responseText || response.statusText);
       throw new Error(`Token exchange failed with HTTP ${response.status}: ${reason}`);
     }
 

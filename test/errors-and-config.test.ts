@@ -142,6 +142,72 @@ describe("kiro enterprise config and errors", () => {
     ).rejects.toThrow("Kiro sign-in could not register with AWS OIDC");
   });
 
+  it("sanitizes secrets in auth failures before surfacing them", async () => {
+    const login = createKiroLogin({
+      fetch: createFetchMock([
+        new Response('Authorization: Bearer super-secret-token {"access_token":"abc123"}', { status: 500 }),
+      ]) as unknown as typeof fetch,
+      sleep: vi.fn(async () => undefined),
+      now: () => 1_700_000_000_000,
+    });
+
+    let message = "";
+    try {
+      await login({
+        onPrompt: vi.fn().mockResolvedValueOnce("1").mockResolvedValueOnce("us-east-1"),
+        onAuth: vi.fn(),
+        onProgress: vi.fn(),
+      });
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+
+    expect(message).toContain("[REDACTED]");
+    expect(message).not.toContain("super-secret-token");
+    expect(message).not.toContain("abc123");
+  });
+
+  it("sanitizes secrets in request failures before surfacing them", async () => {
+    const provider = createKiroProviderConfig({
+      readAuthFile: async () =>
+        JSON.stringify({
+          [KIRO_PROVIDER_NAME]: {
+            type: "oauth",
+            ...identityCenterCredentials,
+          },
+        }),
+      fetch: createFetchMock([
+        new Response('Authorization: Bearer request-secret {"refresh_token":"rt-123"}', { status: 500 }),
+      ]) as unknown as typeof fetch,
+    });
+
+    const stream = provider.streamSimple?.(
+      {
+        id: "claude-sonnet-4",
+        api: KIRO_CUSTOM_API,
+        provider: KIRO_PROVIDER_NAME,
+      } as never,
+      {
+        messages: [
+          {
+            role: "user",
+            content: "hello",
+            timestamp: 1,
+          },
+        ],
+      } as never,
+    );
+
+    const events: Array<{ type: string; error?: { errorMessage?: string } }> = [];
+    for await (const event of stream ?? []) {
+      events.push(event as { type: string; error?: { errorMessage?: string } });
+    }
+
+    expect(events[1]?.error?.errorMessage).toContain("[REDACTED]");
+    expect(events[1]?.error?.errorMessage).not.toContain("request-secret");
+    expect(events[1]?.error?.errorMessage).not.toContain("rt-123");
+  });
+
   it("applies configured profileArn during refresh and keeps refresh errors user-readable", async () => {
     const refreshToken = createKiroRefreshToken({
       resolveRuntimeConfig: async () => ({

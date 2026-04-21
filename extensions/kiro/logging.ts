@@ -46,7 +46,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function sanitizeString(value: string): string {
+export function sanitizeKiroLogString(value: string): string {
   return value
     .replace(/\b(Bearer)\s+[^\s,;]+/gi, `$1 ${REDACTED_VALUE}`)
     .replace(
@@ -78,7 +78,7 @@ function redactValue(key: string | undefined, value: unknown): unknown {
   }
 
   if (typeof value === "string") {
-    return sanitizeString(value);
+    return sanitizeKiroLogString(value);
   }
 
   if (Array.isArray(value)) {

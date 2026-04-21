@@ -1,6 +1,6 @@
 import type { OAuthCredentials } from "@mariozechner/pi-ai";
 
-import { logKiroError, type KiroLoggingDependencies } from "./logging";
+import { logKiroError, sanitizeKiroLogString, type KiroLoggingDependencies } from "./logging";
 import {
   KIRO_AUTH_MODES,
   KIRO_DEFAULT_OIDC_REGION,
@@ -175,11 +175,11 @@ function buildRefreshFailureMessage(
   }
 
   if (parsed.error === "invalid_response") {
-    return `Kiro token refresh failed: ${parsed.errorDescription ?? "invalid provider response."}`;
+    return `Kiro token refresh failed: ${sanitizeKiroLogString(parsed.errorDescription ?? "invalid provider response.")}`;
   }
 
-  const responseDetail = responseText.trim() || response.statusText;
-  const detail = parsed.message ?? parsed.errorDescription ?? parsed.error ?? responseDetail;
+  const responseDetail = sanitizeKiroLogString(responseText.trim() || response.statusText);
+  const detail = sanitizeKiroLogString(parsed.message ?? parsed.errorDescription ?? parsed.error ?? responseDetail);
   return `Kiro token refresh failed with HTTP ${response.status}: ${detail}`;
 }
 
