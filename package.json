@@ -1,0 +1,46 @@
+{
+  "name": "pi-kiro-provider",
+  "version": "0.1.0",
+  "description": "Kiro provider extension package for pi.",
+  "type": "module",
+  "keywords": [
+    "pi",
+    "pi-package",
+    "pi-extension",
+    "kiro",
+    "aws",
+    "amazon-q",
+    "provider"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jtdelia/pi-kiro-provider.git"
+  },
+  "bugs": {
+    "url": "https://github.com/jtdelia/pi-kiro-provider/issues"
+  },
+  "homepage": "https://github.com/jtdelia/pi-kiro-provider#readme",
+  "pi": {
+    "extensions": ["./extensions/kiro.ts"]
+  },
+  "scripts": {
+    "lint": "eslint .",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-ai": "*",
+    "@mariozechner/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.25.1",
+    "@mariozechner/pi-ai": "*",
+    "@mariozechner/pi-coding-agent": "*",
+    "@types/node": "^24.0.0",
+    "eslint": "^9.25.1",
+    "globals": "^16.0.0",
+    "typescript": "^5.8.3",
+    "typescript-eslint": "^8.30.1",
+    "vitest": "^3.1.1"
+  }
+}
