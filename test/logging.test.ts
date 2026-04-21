@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { createKiroLogin } from "../extensions/kiro/auth";
 import { createKiroProviderConfig } from "../extensions/kiro/index";
+import { logKiroError } from "../extensions/kiro/logging";
 import { createKiroRefreshToken } from "../extensions/kiro/refresh";
 import { KIRO_AUTH_MODES, KIRO_CUSTOM_API, KIRO_PROVIDER_NAME, type KiroOAuthCredentials } from "../extensions/kiro/types";
 
@@ -191,6 +192,42 @@ describe("kiro logging", () => {
         requestUrl: "https://oidc.us-east-2.amazonaws.com/token",
         responseStatus: 400,
       });
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("redacts secrets embedded inside string messages, stacks, and context values", async () => {
+    const { logPath, cleanup } = await createTempLogPath();
+
+    try {
+      const error = new Error(
+        'Kiro request failed with HTTP 401: Authorization: Bearer super-secret-token {"access_token":"abc123","clientSecret":"top-secret"}',
+      );
+      error.stack = 'Error: Kiro request failed with HTTP 401: Authorization: Bearer super-secret-token {"access_token":"abc123"}\n    at refresh (refreshToken=rt-123)';
+
+      await logKiroError(
+        { logPath },
+        "request_error",
+        error,
+        {
+          detail: 'authorization=Bearer other-secret-token&refresh_token=rt-456',
+          requestUrl: "https://example.com/?access_token=url-token",
+        },
+      );
+
+      const [entry] = await readLogEntries(logPath);
+      expect(entry?.message).toContain("[REDACTED]");
+      expect(entry?.message).not.toContain("super-secret-token");
+      expect(entry?.message).not.toContain("abc123");
+      expect(entry?.error).toMatchObject({
+        message: expect.stringContaining("[REDACTED]"),
+        stack: expect.stringContaining("refreshToken=[REDACTED]"),
+      });
+      expect(JSON.stringify(entry)).not.toContain("top-secret");
+      expect(JSON.stringify(entry)).not.toContain("other-secret-token");
+      expect(JSON.stringify(entry)).not.toContain("rt-456");
+      expect(JSON.stringify(entry)).not.toContain("url-token");
     } finally {
       await cleanup();
     }

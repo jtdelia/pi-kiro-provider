@@ -7,6 +7,16 @@ export const KIRO_LOG_FILE_NAME = "kiro.log" as const;
 
 const REDACTED_VALUE = "[REDACTED]" as const;
 const SENSITIVE_KEY_PATTERN = /(authorization|token|secret|api[-_]?key|password|access|refresh)/i;
+const SENSITIVE_STRING_FIELD_PATTERN = [
+  "authorization",
+  "access(?:[_-]?token)?",
+  "refresh(?:[_-]?token)?",
+  "id(?:[_-]?token)?",
+  "client(?:[_-]?secret)?",
+  "secret",
+  "api[-_]?key",
+  "password",
+].join("|");
 
 export interface KiroLoggingDependencies {
   logPath?: string;
@@ -36,9 +46,39 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function sanitizeString(value: string): string {
+  return value
+    .replace(/\b(Bearer)\s+[^\s,;]+/gi, `$1 ${REDACTED_VALUE}`)
+    .replace(
+      new RegExp(
+        `([?&](?:${SENSITIVE_STRING_FIELD_PATTERN})=)([^&#\\s]+)`,
+        "gi",
+      ),
+      `$1${REDACTED_VALUE}`,
+    )
+    .replace(
+      new RegExp(
+        `(["']?(?:${SENSITIVE_STRING_FIELD_PATTERN})["']?\\s*[:=]\\s*["'])([^"']*)(["'])`,
+        "gi",
+      ),
+      `$1${REDACTED_VALUE}$3`,
+    )
+    .replace(
+      new RegExp(
+        `(["']?(?:${SENSITIVE_STRING_FIELD_PATTERN})["']?\\s*[:=]\\s*)([^,\\s)}]+)`,
+        "gi",
+      ),
+      `$1${REDACTED_VALUE}`,
+    );
+}
+
 function redactValue(key: string | undefined, value: unknown): unknown {
   if (key && SENSITIVE_KEY_PATTERN.test(key)) {
     return REDACTED_VALUE;
+  }
+
+  if (typeof value === "string") {
+    return sanitizeString(value);
   }
 
   if (Array.isArray(value)) {
