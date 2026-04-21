@@ -15,6 +15,7 @@ import {
 } from "@mariozechner/pi-ai";
 
 import { createKiroOAuthProviderConfig, type KiroLoginDependencies } from "./auth";
+import { logKiroError } from "./logging";
 import { discoverAndMergeKiroProviderModels, getKiroInitialProviderModels } from "./models";
 import {
   adaptPiContextToKiroRequest,
@@ -222,6 +223,9 @@ export function createKiroStreamSimple(dependencies: KiroExtensionDependencies =
       const responseDecoder = createKiroResponseStreamDecoder();
       let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
       let aborted = false;
+      let requestUrl: string | undefined;
+      let responseStatus: number | undefined;
+      let conversationId: string | undefined;
 
       try {
         for (const event of adapter.start()) {
@@ -229,12 +233,13 @@ export function createKiroStreamSimple(dependencies: KiroExtensionDependencies =
         }
 
         const credentials = await resolveKiroStreamCredentials(dependencies, options);
+        conversationId = options?.sessionId ?? randomUUID();
         const preparedRequest = adaptPiContextToKiroRequest({
           modelId: model.id,
           context: context as never,
           credentials,
           reasoning: options?.reasoning,
-          conversationId: options?.sessionId ?? randomUUID(),
+          conversationId,
         });
 
         const nextPayload = await options?.onPayload?.(preparedRequest.payload, model as never);
@@ -251,7 +256,10 @@ export function createKiroStreamSimple(dependencies: KiroExtensionDependencies =
           signal: options?.signal,
         });
 
+        requestUrl = request.url;
+
         const response = await fetchImplementation(request.url, request.init);
+        responseStatus = response.status;
         await options?.onResponse?.(
           { status: response.status, headers: headersToRecord(response.headers) },
           model as never,
@@ -322,6 +330,16 @@ export function createKiroStreamSimple(dependencies: KiroExtensionDependencies =
         const reason = aborted || options?.signal?.aborted ? "aborted" : "error";
         const message = error instanceof Error ? error.message : String(error);
 
+        await logKiroError(dependencies, "request_error", error, {
+          reason,
+          modelId: model.id,
+          provider: model.provider,
+          api: model.api,
+          requestUrl,
+          responseStatus,
+          conversationId,
+        });
+
         for (const event of adapter.pushRawEvent({ type: reason, message })) {
           stream.push(event);
         }
@@ -374,12 +392,16 @@ export default function kiroExtension(pi: ExtensionAPI, dependencies: KiroExtens
   registerProviderWithModels();
 
   pi.on("session_start", async () => {
-    const storedCredentials = await loadStoredKiroCredentials(dependencies);
-    if (!storedCredentials) {
-      return;
-    }
+    try {
+      const storedCredentials = await loadStoredKiroCredentials(dependencies);
+      if (!storedCredentials) {
+        return;
+      }
 
-    await updateProviderModelsForCredentials(storedCredentials);
+      await updateProviderModelsForCredentials(storedCredentials);
+    } catch (error) {
+      await logKiroError(dependencies, "session_start_error", error);
+    }
   });
 }
 

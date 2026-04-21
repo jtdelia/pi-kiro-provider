@@ -1,5 +1,6 @@
-import type { KiroOAuthCredentials } from "./types";
 import { KIRO_FALLBACK_MODEL_CATALOG } from "./fallback-models";
+import { logKiroError, type KiroLoggingDependencies } from "./logging";
+import type { KiroOAuthCredentials } from "./types";
 import type {
   KiroCatalogModelDefinition,
   KiroInputModality,
@@ -21,7 +22,7 @@ const KIRO_DISCOVERY_ENDPOINT_PATHS = [
   "/model-catalog",
 ] as const;
 
-export interface KiroModelDiscoveryDependencies {
+export interface KiroModelDiscoveryDependencies extends KiroLoggingDependencies {
   fetch?: typeof fetch;
 }
 
@@ -395,7 +396,15 @@ export async function discoverAndMergeKiroProviderModels(
   try {
     const discovered = await discoverKiroModels(credentials, dependencies);
     return mergeKiroProviderModels(fallbackModels, discovered.map(toKiroProviderModelConfig));
-  } catch {
+  } catch (error) {
+    await logKiroError(dependencies, "model_discovery_error", error, {
+      region: credentials.region,
+      discoveryUrls: buildKiroDiscoveryUrls(credentials).map((url) => {
+        const parsed = new URL(url);
+        return `${parsed.origin}${parsed.pathname}`;
+      }),
+    });
+
     return fallbackModels.map((model) => ({
       ...model,
       input: [...model.input],

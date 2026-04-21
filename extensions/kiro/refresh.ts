@@ -1,5 +1,6 @@
 import type { OAuthCredentials } from "@mariozechner/pi-ai";
 
+import { logKiroError, type KiroLoggingDependencies } from "./logging";
 import {
   KIRO_AUTH_MODES,
   KIRO_DEFAULT_OIDC_REGION,
@@ -13,7 +14,7 @@ const KIRO_REFRESH_EXPIRY_SAFETY_BUFFER_MS = 5 * 60 * 1000;
 const KIRO_REFRESH_USER_AGENT = "KiroIDE";
 const KIRO_REFRESH_GRANT_TYPE = "refresh_token";
 
-export interface KiroRefreshDependencies {
+export interface KiroRefreshDependencies extends KiroLoggingDependencies {
   fetch?: typeof fetch;
   now?: () => number;
   resolveRuntimeConfig?: () => Promise<KiroRuntimeConfig> | KiroRuntimeConfig;
@@ -236,58 +237,77 @@ export function buildIdentityCenterRefreshRequest(
 
 export function createKiroRefreshToken(dependencies: KiroRefreshDependencies = {}) {
   return async function refreshKiroToken(credentials: OAuthCredentials): Promise<KiroOAuthCredentials> {
-    const runtimeConfig = await getRuntimeConfig(dependencies);
-    const kiroCredentials = applyKiroProfileArnOverride(
-      credentials as KiroOAuthCredentials,
-      runtimeConfig.profileArn,
-    );
-    const authMode = normalizeStoredAuthMode(kiroCredentials.authMode);
-    const request =
-      authMode === KIRO_AUTH_MODES.IDENTITY_CENTER
-        ? buildIdentityCenterRefreshRequest(kiroCredentials)
-        : buildBuilderIdRefreshRequest(kiroCredentials);
+    let authMode: KiroAuthMode | undefined;
+    let requestUrl: string | undefined;
+    let responseStatus: number | undefined;
 
-    const fetchImplementation = getFetchImplementation(dependencies);
-    const now = getNow(dependencies)();
-
-    let response: Response;
     try {
-      response = await fetchImplementation(request.url, request.init);
-    } catch (error) {
-      throw new Error(
-        `Kiro token refresh failed: ${error instanceof Error ? error.message : "network request failed."}`,
+      const runtimeConfig = await getRuntimeConfig(dependencies);
+      const kiroCredentials = applyKiroProfileArnOverride(
+        credentials as KiroOAuthCredentials,
+        runtimeConfig.profileArn,
       );
-    }
+      authMode = normalizeStoredAuthMode(kiroCredentials.authMode);
+      const request =
+        authMode === KIRO_AUTH_MODES.IDENTITY_CENTER
+          ? buildIdentityCenterRefreshRequest(kiroCredentials)
+          : buildBuilderIdRefreshRequest(kiroCredentials);
 
-    const responseText = await response.text();
-    const parsed = parseRefreshResponse(responseText);
+      requestUrl = request.url;
 
-    if (!response.ok) {
-      throw new Error(buildRefreshFailureMessage(authMode, response, parsed, responseText));
-    }
+      const fetchImplementation = getFetchImplementation(dependencies);
+      const now = getNow(dependencies)();
 
-    if (!parsed.accessToken) {
-      if (parsed.error === "invalid_grant") {
-        throw new Error(`${describeRefreshTarget(authMode)} refresh token is invalid or expired. Run /login again.`);
+      let response: Response;
+      try {
+        response = await fetchImplementation(request.url, request.init);
+      } catch (error) {
+        throw new Error(
+          `Kiro token refresh failed: ${error instanceof Error ? error.message : "network request failed."}`,
+        );
       }
 
-      throw new Error(
-        `Kiro token refresh failed: ${parsed.errorDescription ?? "response did not include an access token."}`,
-      );
-    }
+      responseStatus = response.status;
+      const responseText = await response.text();
+      const parsed = parseRefreshResponse(responseText);
 
-    return {
-      refresh: parsed.refreshToken ?? kiroCredentials.refresh,
-      access: parsed.accessToken,
-      expires: calculateBufferedExpiry(now, parsed.expiresIn),
-      authMode,
-      region: normalizeStoredRegion(kiroCredentials.region),
-      oidcRegion: normalizeStoredRegion(kiroCredentials.oidcRegion ?? kiroCredentials.region),
-      startUrl: kiroCredentials.startUrl,
-      clientId: requireNonEmptyString(kiroCredentials.clientId, "Client ID"),
-      clientSecret: requireNonEmptyString(kiroCredentials.clientSecret, "Client secret"),
-      profileArn: kiroCredentials.profileArn,
-    };
+      if (!response.ok) {
+        throw new Error(buildRefreshFailureMessage(authMode, response, parsed, responseText));
+      }
+
+      if (!parsed.accessToken) {
+        if (parsed.error === "invalid_grant") {
+          throw new Error(`${describeRefreshTarget(authMode)} refresh token is invalid or expired. Run /login again.`);
+        }
+
+        throw new Error(
+          `Kiro token refresh failed: ${parsed.errorDescription ?? "response did not include an access token."}`,
+        );
+      }
+
+      return {
+        refresh: parsed.refreshToken ?? kiroCredentials.refresh,
+        access: parsed.accessToken,
+        expires: calculateBufferedExpiry(now, parsed.expiresIn),
+        authMode,
+        region: normalizeStoredRegion(kiroCredentials.region),
+        oidcRegion: normalizeStoredRegion(kiroCredentials.oidcRegion ?? kiroCredentials.region),
+        startUrl: kiroCredentials.startUrl,
+        clientId: requireNonEmptyString(kiroCredentials.clientId, "Client ID"),
+        clientSecret: requireNonEmptyString(kiroCredentials.clientSecret, "Client secret"),
+        profileArn: kiroCredentials.profileArn,
+      };
+    } catch (error) {
+      const kiroCredentials = credentials as KiroOAuthCredentials;
+      await logKiroError(dependencies, "refresh_error", error, {
+        authMode,
+        region: kiroCredentials.region,
+        oidcRegion: kiroCredentials.oidcRegion,
+        requestUrl,
+        responseStatus,
+      });
+      throw error;
+    }
   };
 }
 
