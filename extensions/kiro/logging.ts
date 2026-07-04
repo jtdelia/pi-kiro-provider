@@ -31,11 +31,11 @@ interface KiroSerializedError {
 
 interface KiroLogEntry {
   timestamp: string;
-  level: "error";
+  level: "error" | "info";
   event: string;
   message: string;
   context?: Record<string, unknown>;
-  error: KiroSerializedError;
+  error?: KiroSerializedError;
 }
 
 export function getDefaultKiroLogPath(): string {
@@ -114,21 +114,10 @@ async function defaultAppendLogFile(path: string, content: string): Promise<void
   await appendFile(path, content, "utf8");
 }
 
-export async function logKiroError(
+async function writeKiroLogEntry(
   dependencies: KiroLoggingDependencies,
-  event: string,
-  error: unknown,
-  context?: Record<string, unknown>,
+  entry: KiroLogEntry,
 ): Promise<void> {
-  const entry: KiroLogEntry = {
-    timestamp: new Date().toISOString(),
-    level: "error",
-    event,
-    message: error instanceof Error ? error.message : String(error),
-    context: context ? (redactValue(undefined, context) as Record<string, unknown>) : undefined,
-    error: serializeError(error),
-  };
-
   const appendLogFile = dependencies.appendLogFile ?? defaultAppendLogFile;
   const logPath = dependencies.logPath ?? getDefaultKiroLogPath();
 
@@ -137,4 +126,35 @@ export async function logKiroError(
   } catch {
     // Logging must never break the provider.
   }
+}
+
+export async function logKiroInfo(
+  dependencies: KiroLoggingDependencies,
+  event: string,
+  message: string,
+  context?: Record<string, unknown>,
+): Promise<void> {
+  await writeKiroLogEntry(dependencies, {
+    timestamp: new Date().toISOString(),
+    level: "info",
+    event,
+    message,
+    context: context ? (redactValue(undefined, context) as Record<string, unknown>) : undefined,
+  });
+}
+
+export async function logKiroError(
+  dependencies: KiroLoggingDependencies,
+  event: string,
+  error: unknown,
+  context?: Record<string, unknown>,
+): Promise<void> {
+  await writeKiroLogEntry(dependencies, {
+    timestamp: new Date().toISOString(),
+    level: "error",
+    event,
+    message: error instanceof Error ? error.message : String(error),
+    context: context ? (redactValue(undefined, context) as Record<string, unknown>) : undefined,
+    error: serializeError(error),
+  });
 }

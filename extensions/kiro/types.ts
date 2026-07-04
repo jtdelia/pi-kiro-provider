@@ -160,6 +160,13 @@ export interface KiroRequestAdapterInput {
   serviceModelId?: string;
 }
 
+export interface KiroRequestDiagnostics {
+  toolResultTruncationCount: number;
+  currentMessageTruncated: boolean;
+  prunedHistoryMessageCount: number;
+  finalPayloadChars: number;
+}
+
 export interface KiroPreparedRequest {
   endpoint: string;
   region: string;
@@ -168,6 +175,7 @@ export interface KiroPreparedRequest {
   effectiveSystemPrompt?: string;
   thinkingConfig: KiroThinkingConfig;
   payload: KiroRequestPayload;
+  diagnostics?: KiroRequestDiagnostics;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
