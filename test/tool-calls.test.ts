@@ -477,4 +477,78 @@ describe("kiro tool-call support", () => {
       },
     ]);
   });
+
+  it("inserts synthetic tool results when the conversation ends with an assistant tool use", () => {
+    const normalized = normalizeKiroMessages([
+      {
+        role: "user",
+        content: "Inspect the file",
+        timestamp: 1,
+      },
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "toolCall",
+            id: "call-final",
+            name: "read_file",
+            arguments: { path: "src/index.ts" },
+          },
+        ],
+        api: "kiro-api",
+        provider: "kiro",
+        model: "claude-sonnet-4",
+        usage: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+        stopReason: "toolUse",
+        timestamp: 2,
+      },
+    ]);
+
+    expect(normalized).toEqual([
+      {
+        role: "user",
+        content: "Inspect the file",
+        timestamp: 1,
+      },
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "toolCall",
+            id: "call-final",
+            name: "read_file",
+            arguments: { path: "src/index.ts" },
+          },
+        ],
+        api: "kiro-api",
+        provider: "kiro",
+        model: "claude-sonnet-4",
+        usage: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+        stopReason: "toolUse",
+        timestamp: 2,
+      },
+      {
+        role: "toolResult",
+        toolCallId: "call-final",
+        toolName: "read_file",
+        content: [{ type: "text", text: "No result provided" }],
+        isError: true,
+        timestamp: expect.any(Number),
+      },
+    ]);
+  });
 });

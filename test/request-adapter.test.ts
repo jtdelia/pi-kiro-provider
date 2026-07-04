@@ -1,4 +1,5 @@
 import { Type } from "@sinclair/typebox";
+import type { Message } from "@mariozechner/pi-ai";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -230,7 +231,7 @@ describe("kiro request adapter", () => {
 
   it("prunes oversized replay history to stay within a payload budget", () => {
     const longChunk = "x".repeat(80_000);
-    const messages: any[] = [];
+    const messages: Message[] = [];
 
     for (let index = 0; index < 8; index += 1) {
       messages.push({

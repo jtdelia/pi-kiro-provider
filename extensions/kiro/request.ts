@@ -411,6 +411,7 @@ export function normalizeKiroMessages(messages: readonly Message[]): Message[] {
     normalized.push(message);
   }
 
+  flushPendingToolCalls();
   return normalized;
 }
 
