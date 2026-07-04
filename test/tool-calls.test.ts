@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   adaptPiContextToKiroRequest,
+  convertAssistantMessageToKiroMessage,
   convertPiToolDefinitions,
   normalizeKiroMessages,
 } from "../extensions/kiro/request";
@@ -172,6 +173,46 @@ describe("kiro tool-call support", () => {
     }
   });
 
+  it("fills empty assistant tool-use content with a placeholder", () => {
+    const converted = convertAssistantMessageToKiroMessage({
+      role: "assistant",
+      content: [
+        {
+          type: "toolCall",
+          id: "call-placeholder",
+          name: "read_file",
+          arguments: { path: "src/index.ts" },
+        },
+      ],
+      api: "kiro-api",
+      provider: "kiro",
+      model: "claude-sonnet-4",
+      usage: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 0,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      stopReason: "toolUse",
+      timestamp: 2,
+    });
+
+    expect(converted).toEqual({
+      assistantResponseMessage: {
+        content: "(empty)",
+        toolUses: [
+          {
+            toolUseId: "call-placeholder",
+            name: "read_file",
+            input: { path: "src/index.ts" },
+          },
+        ],
+      },
+    });
+  });
+
   it("tool result follow-up requests convert correctly", () => {
     const prepared = adaptPiContextToKiroRequest({
       modelId: "claude-sonnet-4",
@@ -229,7 +270,7 @@ describe("kiro tool-call support", () => {
       },
       {
         assistantResponseMessage: {
-          content: "",
+          content: "(empty)",
           toolUses: [
             {
               toolUseId: "call-4",
@@ -342,7 +383,7 @@ describe("kiro tool-call support", () => {
       },
       {
         assistantResponseMessage: {
-          content: "",
+          content: "(empty)",
           toolUses: [
             {
               toolUseId: "call-ls",
