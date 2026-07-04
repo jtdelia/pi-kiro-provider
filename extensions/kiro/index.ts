@@ -15,7 +15,7 @@ import {
 } from "@mariozechner/pi-ai";
 
 import { createKiroOAuthProviderConfig, type KiroLoginDependencies } from "./auth";
-import { logKiroError } from "./logging";
+import { logKiroError, logKiroInfo } from "./logging";
 import { discoverAndMergeKiroProviderModels, getKiroInitialProviderModels } from "./models";
 import {
   adaptPiContextToKiroRequest,
@@ -241,6 +241,21 @@ export function createKiroStreamSimple(dependencies: KiroExtensionDependencies =
           reasoning: options?.reasoning,
           conversationId,
         });
+
+        if (
+          preparedRequest.diagnostics &&
+          (preparedRequest.diagnostics.toolResultTruncationCount > 0 ||
+            preparedRequest.diagnostics.currentMessageTruncated ||
+            preparedRequest.diagnostics.prunedHistoryMessageCount > 0)
+        ) {
+          await logKiroInfo(dependencies, "request_budget_applied", "Kiro request budget applied.", {
+            modelId: model.id,
+            provider: model.provider,
+            api: model.api,
+            conversationId,
+            diagnostics: preparedRequest.diagnostics,
+          });
+        }
 
         const nextPayload = await options?.onPayload?.(preparedRequest.payload, model as never);
         const request = buildKiroTransportRequest({

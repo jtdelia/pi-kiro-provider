@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   adaptPiContextToKiroRequest,
   convertPiToolDefinitions,
+  normalizeKiroMessages,
 } from "../extensions/kiro/request";
 import { convertKiroStreamEventsToAssistantEvents } from "../extensions/kiro/stream";
 import type { KiroOAuthCredentials } from "../extensions/kiro/types";
@@ -268,5 +269,212 @@ describe("kiro tool-call support", () => {
         ],
       },
     });
+  });
+
+  it("aggregates consecutive tool results into one current message", () => {
+    const prepared = adaptPiContextToKiroRequest({
+      modelId: "claude-sonnet-4",
+      credentials,
+      context: {
+        messages: [
+          {
+            role: "user",
+            content: "Investigate Archon",
+            timestamp: 1,
+          },
+          {
+            role: "assistant",
+            content: [
+              {
+                type: "toolCall",
+                id: "call-ls",
+                name: "bash",
+                arguments: { command: "ls -la" },
+              },
+              {
+                type: "toolCall",
+                id: "call-help",
+                name: "bash",
+                arguments: { command: "archon --help" },
+              },
+            ],
+            api: "kiro-api",
+            provider: "kiro",
+            model: "claude-sonnet-4",
+            usage: {
+              input: 0,
+              output: 0,
+              cacheRead: 0,
+              cacheWrite: 0,
+              totalTokens: 0,
+              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+            },
+            stopReason: "toolUse",
+            timestamp: 2,
+          },
+          {
+            role: "toolResult",
+            toolCallId: "call-ls",
+            toolName: "bash",
+            content: [{ type: "text", text: "total 8" }],
+            isError: false,
+            timestamp: 3,
+          },
+          {
+            role: "toolResult",
+            toolCallId: "call-help",
+            toolName: "bash",
+            content: [{ type: "text", text: "Usage: archon" }],
+            isError: false,
+            timestamp: 4,
+          },
+        ],
+      },
+    });
+
+    expect(prepared.payload.conversationState.history).toEqual([
+      {
+        userInputMessage: {
+          content: "Investigate Archon",
+          modelId: "claude-sonnet-4",
+          origin: "AI_EDITOR",
+        },
+      },
+      {
+        assistantResponseMessage: {
+          content: "",
+          toolUses: [
+            {
+              toolUseId: "call-ls",
+              name: "bash",
+              input: { command: "ls -la" },
+            },
+            {
+              toolUseId: "call-help",
+              name: "bash",
+              input: { command: "archon --help" },
+            },
+          ],
+        },
+      },
+    ]);
+
+    expect(prepared.payload.conversationState.currentMessage.userInputMessage).toEqual({
+      content: "total 8\n\nUsage: archon",
+      modelId: "claude-sonnet-4",
+      origin: "AI_EDITOR",
+      userInputMessageContext: {
+        toolResults: [
+          {
+            toolUseId: "call-ls",
+            content: [{ text: "total 8" }],
+            status: "success",
+          },
+          {
+            toolUseId: "call-help",
+            content: [{ text: "Usage: archon" }],
+            status: "success",
+          },
+        ],
+        tools: [
+          {
+            toolSpecification: {
+              name: "bash",
+              description: "Tool",
+              inputSchema: {
+                json: {
+                  type: "object",
+                  properties: {},
+                },
+              },
+            },
+          },
+        ],
+      },
+    });
+  });
+
+  it("inserts synthetic tool results before a later user message when tool results are missing", () => {
+    const normalized = normalizeKiroMessages([
+      {
+        role: "user",
+        content: "Inspect the file",
+        timestamp: 1,
+      },
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "toolCall",
+            id: "call-missing",
+            name: "read_file",
+            arguments: { path: "src/index.ts" },
+          },
+        ],
+        api: "kiro-api",
+        provider: "kiro",
+        model: "claude-sonnet-4",
+        usage: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+        stopReason: "toolUse",
+        timestamp: 2,
+      },
+      {
+        role: "user",
+        content: "Please continue",
+        timestamp: 3,
+      },
+    ]);
+
+    expect(normalized).toEqual([
+      {
+        role: "user",
+        content: "Inspect the file",
+        timestamp: 1,
+      },
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "toolCall",
+            id: "call-missing",
+            name: "read_file",
+            arguments: { path: "src/index.ts" },
+          },
+        ],
+        api: "kiro-api",
+        provider: "kiro",
+        model: "claude-sonnet-4",
+        usage: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+        stopReason: "toolUse",
+        timestamp: 2,
+      },
+      {
+        role: "toolResult",
+        toolCallId: "call-missing",
+        toolName: "read_file",
+        content: [{ type: "text", text: "No result provided" }],
+        isError: true,
+        timestamp: expect.any(Number),
+      },
+      {
+        role: "user",
+        content: "Please continue",
+        timestamp: 3,
+      },
+    ]);
   });
 });

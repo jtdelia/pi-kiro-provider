@@ -207,4 +207,73 @@ describe("kiro request adapter", () => {
       "arn:aws:codewhisperer:eu-central-1:123456789012:profile/example",
     );
   });
+
+  it("truncates oversized tool result text", () => {
+    const longText = `${"a".repeat(70_000)}${"b".repeat(70_000)}`;
+    const message = convertToolResultMessageToKiroMessage(
+      {
+        role: "toolResult",
+        toolCallId: "call-long",
+        toolName: "bash",
+        content: [{ type: "text", text: longText }],
+        isError: false,
+        timestamp: 10,
+      },
+      "claude-sonnet-4",
+    );
+
+    const truncated = message.userInputMessage?.userInputMessageContext?.toolResults?.[0]?.content[0]?.text;
+    expect(truncated).toContain("... [TRUNCATED] ...");
+    expect(truncated?.length).toBeLessThan(longText.length);
+    expect(message.userInputMessage?.content).toContain("... [TRUNCATED] ...");
+  });
+
+  it("prunes oversized replay history to stay within a payload budget", () => {
+    const longChunk = "x".repeat(80_000);
+    const messages: any[] = [];
+
+    for (let index = 0; index < 8; index += 1) {
+      messages.push({
+        role: "user",
+        content: `user-${index}-${longChunk}`,
+        timestamp: index * 2 + 1,
+      });
+      messages.push({
+        role: "assistant",
+        content: [{ type: "text", text: `assistant-${index}-${longChunk}` }],
+        api: "kiro-api",
+        provider: "kiro",
+        model: "claude-sonnet-4",
+        usage: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+        stopReason: "stop",
+        timestamp: index * 2 + 2,
+      });
+    }
+
+    messages.push({
+      role: "user",
+      content: "latest question",
+      timestamp: 100,
+    });
+
+    const prepared = adaptPiContextToKiroRequest({
+      modelId: "claude-sonnet-4",
+      credentials,
+      context: { messages },
+    });
+
+    const payloadText = JSON.stringify(prepared.payload);
+    const firstHistoryUser = prepared.payload.conversationState.history?.find((entry) => entry.userInputMessage)?.userInputMessage;
+
+    expect(payloadText.length).toBeLessThan(650_000);
+    expect(firstHistoryUser?.content.startsWith("user-0-")).toBe(false);
+    expect(prepared.payload.conversationState.currentMessage.userInputMessage.content).toBe("latest question");
+  });
 });

@@ -6,7 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { createKiroLogin } from "../extensions/kiro/auth";
 import { createKiroProviderConfig } from "../extensions/kiro/index";
-import { logKiroError } from "../extensions/kiro/logging";
+import { logKiroError, logKiroInfo } from "../extensions/kiro/logging";
 import { createKiroRefreshToken } from "../extensions/kiro/refresh";
 import { KIRO_AUTH_MODES, KIRO_CUSTOM_API, KIRO_PROVIDER_NAME, type KiroOAuthCredentials } from "../extensions/kiro/types";
 
@@ -140,6 +140,142 @@ describe("kiro logging", () => {
         requestUrl: "https://q.us-west-2.amazonaws.com/generateAssistantResponse",
         responseStatus: 500,
       });
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("writes info-level budget diagnostics to the log file", async () => {
+    const { logPath, cleanup } = await createTempLogPath();
+
+    try {
+      await logKiroInfo(
+        { logPath },
+        "request_budget_applied",
+        "Kiro request budget applied.",
+        {
+          diagnostics: {
+            toolResultTruncationCount: 2,
+            currentMessageTruncated: false,
+            prunedHistoryMessageCount: 4,
+            finalPayloadChars: 123456,
+          },
+          authorization: "Bearer secret-token",
+        },
+      );
+
+      const entries = await readLogEntries(logPath);
+      expect(entries).toHaveLength(1);
+      expect(entries[0]).toMatchObject({
+        level: "info",
+        event: "request_budget_applied",
+        message: "Kiro request budget applied.",
+        context: {
+          diagnostics: {
+            toolResultTruncationCount: 2,
+            currentMessageTruncated: false,
+            prunedHistoryMessageCount: 4,
+            finalPayloadChars: 123456,
+          },
+          authorization: "[REDACTED]",
+        },
+      });
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("logs request budget diagnostics during provider requests when truncation or pruning happens", async () => {
+    const { logPath, cleanup } = await createTempLogPath();
+
+    try {
+      const provider = createKiroProviderConfig({
+        logPath,
+        fetch: vi.fn(async () => new Response("boom", { status: 500 })) as unknown as typeof fetch,
+        readAuthFile: async () =>
+          JSON.stringify({
+            kiro: {
+              type: "oauth",
+              access: "stored-access-token",
+              refresh: "refresh-token",
+              expires: Date.now() + 60_000,
+              authMode: "builder-id",
+              region: "us-west-2",
+              oidcRegion: "us-west-2",
+              clientId: "client-id",
+              clientSecret: "client-secret",
+            },
+          }),
+      });
+
+      const stream = provider.streamSimple?.(
+        {
+          id: "claude-sonnet-4",
+          api: KIRO_CUSTOM_API,
+          provider: KIRO_PROVIDER_NAME,
+        } as never,
+        {
+          messages: [
+            {
+              role: "user",
+              content: "Inspect the file",
+              timestamp: 1,
+            },
+            {
+              role: "assistant",
+              content: [
+                {
+                  type: "toolCall",
+                  id: "call-1",
+                  name: "bash",
+                  arguments: { command: "cat huge-file" },
+                },
+              ],
+              api: KIRO_CUSTOM_API,
+              provider: KIRO_PROVIDER_NAME,
+              model: "claude-sonnet-4",
+              usage: {
+                input: 0,
+                output: 0,
+                cacheRead: 0,
+                cacheWrite: 0,
+                totalTokens: 0,
+                cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+              },
+              stopReason: "toolUse",
+              timestamp: 2,
+            },
+            {
+              role: "toolResult",
+              toolCallId: "call-1",
+              toolName: "bash",
+              content: [{ type: "text", text: `${"a".repeat(80_000)}${"b".repeat(80_000)}` }],
+              isError: false,
+              timestamp: 3,
+            },
+          ],
+        } as never,
+      );
+
+      const events = await collectStreamEvents(requireStream(stream));
+      expect((events.at(-1) as { type: string }).type).toBe("error");
+
+      const entries = await readLogEntries(logPath);
+      expect(entries).toHaveLength(2);
+      expect(entries[0]).toMatchObject({
+        level: "info",
+        event: "request_budget_applied",
+        message: "Kiro request budget applied.",
+        context: {
+          modelId: "claude-sonnet-4",
+          provider: KIRO_PROVIDER_NAME,
+          api: KIRO_CUSTOM_API,
+          diagnostics: {
+            toolResultTruncationCount: 1,
+          },
+        },
+      });
+      expect(entries[1]?.event).toBe("request_error");
     } finally {
       await cleanup();
     }
