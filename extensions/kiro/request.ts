@@ -31,6 +31,7 @@ const KIRO_CONTINUATION_MESSAGE = "Continue";
 const KIRO_RUNNING_TOOLS_MESSAGE = "Running tools...";
 const KIRO_SYNTHETIC_TOOL_CALL_MESSAGE = "I will execute the following tools.";
 const KIRO_SYNTHETIC_TOOL_RESULT_MESSAGE = "No result provided";
+const KIRO_EMPTY_ASSISTANT_MESSAGE = "(empty)";
 const KIRO_DEFAULT_TOOL_RESULT_MESSAGE = "Tool results provided.";
 const KIRO_GENERATE_ASSISTANT_RESPONSE_PATH = "/generateAssistantResponse";
 const KIRO_TRANSPORT_USER_AGENT = "aws-sdk-js/3.738.0 KiroIDE";
@@ -230,7 +231,7 @@ export function convertAssistantMessageToKiroMessage(
   }
 
   const assistantResponseMessage: KiroAssistantResponseMessage = {
-    content,
+    content: content || (toolUses.length > 0 ? KIRO_EMPTY_ASSISTANT_MESSAGE : content),
   };
 
   if (toolUses.length > 0) {
