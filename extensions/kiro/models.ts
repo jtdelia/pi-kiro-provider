@@ -16,11 +16,9 @@ const KIRO_ZERO_COST: Readonly<KiroModelCost> = Object.freeze({
   cacheWrite: 0,
 });
 
-const KIRO_DISCOVERY_ENDPOINT_PATHS = [
-  "/models",
-  "/listModels",
-  "/model-catalog",
-] as const;
+const KIRO_LIST_MODELS_TARGET = "AmazonCodeWhispererService.ListAvailableModels" as const;
+const KIRO_LIST_MODELS_CONTENT_TYPE = "application/x-amz-json-1.0" as const;
+const KIRO_LIST_MODELS_ORIGIN = "CLI" as const;
 
 export interface KiroModelDiscoveryDependencies extends KiroLoggingDependencies {
   fetch?: typeof fetch;
@@ -31,13 +29,16 @@ export interface KiroDiscoveredModelRecord {
   slug?: string;
   name?: string;
   displayName?: string;
+  modelName?: string;
   serviceModelId?: string;
   modelId?: string;
   family?: string;
   reasoning?: boolean;
   supportsReasoning?: boolean;
   reasoningSupported?: boolean;
+  supportsPromptCache?: boolean;
   inputModalities?: readonly KiroInputModality[];
+  supportedInputTypes?: readonly string[];
   modalities?: {
     input?: readonly KiroInputModality[];
   };
@@ -47,10 +48,18 @@ export interface KiroDiscoveredModelRecord {
   max_tokens?: number;
   maxOutputTokens?: number;
   max_output_tokens?: number;
+  maxInputTokens?: number;
+  tokenLimits?: {
+    maxInputTokens?: number;
+    maxOutputTokens?: number;
+  };
   limit?: {
     context?: number;
     output?: number;
   };
+  rateMultiplier?: number;
+  rateUnit?: string;
+  description?: string;
   notes?: string;
 }
 
@@ -147,6 +156,10 @@ export function deriveContextWindow(model: KiroCatalogModelDefinition): number {
       return 128000;
     case "qwen3-coder-next":
       return 256000;
+    case "gpt-5.6-sol":
+    case "gpt-5.6-terra":
+    case "gpt-5.6-luna":
+      return 272000;
     default:
       return 200000;
   }
@@ -214,69 +227,146 @@ export function getKiroInitialProviderModels(): KiroProviderModelConfig[] {
 
 export function normalizeDiscoveredKiroModel(record: KiroDiscoveredModelRecord): KiroNormalizedModelDefinition {
   const id = record.id ?? record.slug ?? record.serviceModelId ?? record.modelId;
-  const name = record.name ?? record.displayName ?? id;
+  const name = record.name ?? record.displayName ?? record.modelName ?? id;
 
   if (!id || !name) {
     throw new Error("Discovered Kiro model is missing an id or name.");
+  }
+
+  // Derive input modalities from supportedInputTypes (API uses "TEXT", "IMAGE")
+  let inputModalities: readonly KiroInputModality[] | undefined =
+    record.inputModalities ?? record.modalities?.input;
+  if (!inputModalities && record.supportedInputTypes) {
+    inputModalities = record.supportedInputTypes
+      .map((t) => t.toLowerCase())
+      .filter((t): t is KiroInputModality => t === "text" || t === "image");
   }
 
   const catalogModel: KiroCatalogModelDefinition = {
     id,
     name,
     serviceModelId: record.serviceModelId ?? record.modelId ?? id,
-    family: record.family,
+    family: record.family ?? deriveModelFamily(id),
     reasoning: record.reasoning ?? record.supportsReasoning ?? record.reasoningSupported,
-    inputModalities: record.inputModalities ?? record.modalities?.input,
-    contextWindow: record.contextWindow ?? record.context_window ?? record.limit?.context,
-    maxTokens: record.maxTokens ?? record.max_tokens ?? record.maxOutputTokens ?? record.max_output_tokens ?? record.limit?.output,
-    notes: record.notes,
+    inputModalities,
+    contextWindow: record.contextWindow
+      ?? record.context_window
+      ?? record.maxInputTokens
+      ?? record.tokenLimits?.maxInputTokens
+      ?? record.limit?.context,
+    maxTokens: record.maxTokens
+      ?? record.max_tokens
+      ?? record.maxOutputTokens
+      ?? record.max_output_tokens
+      ?? record.tokenLimits?.maxOutputTokens
+      ?? record.limit?.output,
+    notes: record.notes ?? record.description,
   };
 
   return normalizeKiroCatalogModel(catalogModel, "discovered");
 }
 
+function deriveModelFamily(modelId: string): string | undefined {
+  if (modelId.startsWith("claude-")) return "claude";
+  if (modelId.startsWith("gpt-")) return "openai";
+  if (modelId.startsWith("deepseek-")) return "deepseek";
+  if (modelId.startsWith("minimax-")) return "minimax";
+  if (modelId.startsWith("glm-")) return "glm";
+  if (modelId.startsWith("qwen")) return "qwen";
+  return undefined;
+}
+
+function readSupportedInputTypes(value: unknown): KiroInputModality[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const mapped = value
+    .filter((item): item is string => typeof item === "string")
+    .map((item) => item.toLowerCase())
+    .filter((item): item is KiroInputModality => item === "text" || item === "image");
+  return mapped.length > 0 ? mapped : undefined;
+}
+
+function extractSingleModelRecord(item: Record<string, unknown>): KiroDiscoveredModelRecord {
+  const tokenLimits = isRecord(item.tokenLimits) ? item.tokenLimits : undefined;
+
+  return {
+    id: readString(item.id) ?? readString(item.modelId),
+    slug: readString(item.slug),
+    name: readString(item.name) ?? readString(item.modelName),
+    displayName: readString(item.displayName) ?? readString(item.modelName),
+    modelName: readString(item.modelName),
+    serviceModelId: readString(item.serviceModelId) ?? readString(item.modelId),
+    modelId: readString(item.modelId),
+    family: readString(item.family),
+    reasoning: readBoolean(item.reasoning),
+    supportsReasoning: readBoolean(item.supportsReasoning),
+    reasoningSupported: readBoolean(item.reasoningSupported),
+    supportsPromptCache: readBoolean(item.supportsPromptCache),
+    inputModalities: readInputModalities(item.inputModalities)
+      ?? readSupportedInputTypes(item.supportedInputTypes),
+    supportedInputTypes: Array.isArray(item.supportedInputTypes)
+      ? item.supportedInputTypes.filter((v): v is string => typeof v === "string")
+      : undefined,
+    modalities: isRecord(item.modalities)
+      ? { input: readInputModalities(item.modalities.input) }
+      : undefined,
+    contextWindow: readNumber(item.contextWindow)
+      ?? readNumber(item.context_window)
+      ?? readNumber(tokenLimits?.maxInputTokens),
+    context_window: readNumber(item.context_window),
+    maxTokens: readNumber(item.maxTokens)
+      ?? readNumber(item.max_tokens)
+      ?? readNumber(item.maxOutputTokens)
+      ?? readNumber(item.max_output_tokens)
+      ?? readNumber(tokenLimits?.maxOutputTokens),
+    max_tokens: readNumber(item.max_tokens),
+    maxOutputTokens: readNumber(item.maxOutputTokens) ?? readNumber(tokenLimits?.maxOutputTokens),
+    max_output_tokens: readNumber(item.max_output_tokens),
+    maxInputTokens: readNumber(item.maxInputTokens) ?? readNumber(tokenLimits?.maxInputTokens),
+    tokenLimits: tokenLimits
+      ? {
+          maxInputTokens: readNumber(tokenLimits.maxInputTokens),
+          maxOutputTokens: readNumber(tokenLimits.maxOutputTokens),
+        }
+      : undefined,
+    limit: isRecord(item.limit)
+      ? {
+          context: readNumber(item.limit.context),
+          output: readNumber(item.limit.output),
+        }
+      : undefined,
+    rateMultiplier: typeof item.rateMultiplier === "number" ? item.rateMultiplier : undefined,
+    rateUnit: readString(item.rateUnit),
+    description: readString(item.description),
+    notes: readString(item.notes) ?? readString(item.description),
+  };
+}
+
 export function extractKiroDiscoveredModelRecords(payload: unknown): KiroDiscoveredModelRecord[] {
   if (Array.isArray(payload)) {
-    return payload.filter(isRecord).map((item) => ({
-      id: readString(item.id),
-      slug: readString(item.slug),
-      name: readString(item.name),
-      displayName: readString(item.displayName),
-      serviceModelId: readString(item.serviceModelId),
-      modelId: readString(item.modelId),
-      family: readString(item.family),
-      reasoning: readBoolean(item.reasoning),
-      supportsReasoning: readBoolean(item.supportsReasoning),
-      reasoningSupported: readBoolean(item.reasoningSupported),
-      inputModalities: readInputModalities(item.inputModalities),
-      modalities: isRecord(item.modalities)
-        ? { input: readInputModalities(item.modalities.input) }
-        : undefined,
-      contextWindow: readNumber(item.contextWindow),
-      context_window: readNumber(item.context_window),
-      maxTokens: readNumber(item.maxTokens),
-      max_tokens: readNumber(item.max_tokens),
-      maxOutputTokens: readNumber(item.maxOutputTokens),
-      max_output_tokens: readNumber(item.max_output_tokens),
-      limit: isRecord(item.limit)
-        ? {
-            context: readNumber(item.limit.context),
-            output: readNumber(item.limit.output),
-          }
-        : undefined,
-      notes: readString(item.notes),
-    }));
+    return payload.filter(isRecord).map(extractSingleModelRecord);
   }
 
   if (!isRecord(payload)) {
     return [];
   }
 
+  // Handle ListAvailableModels response which has { models: [...], defaultModel: {...} }
   const candidateKeys = ["models", "items", "data", "modelCatalog", "catalog"] as const;
   for (const key of candidateKeys) {
     const candidate = payload[key];
     const extracted = extractKiroDiscoveredModelRecords(candidate);
     if (extracted.length > 0) {
+      // If there's a defaultModel at the top level and it's not already in the list, prepend it
+      if (key === "models" && isRecord(payload.defaultModel)) {
+        const defaultRecord = extractSingleModelRecord(payload.defaultModel as Record<string, unknown>);
+        const defaultId = defaultRecord.id ?? defaultRecord.modelId;
+        if (defaultId && !extracted.some((r) => (r.id ?? r.modelId) === defaultId)) {
+          extracted.unshift(defaultRecord);
+        }
+      }
       return extracted;
     }
   }
@@ -284,15 +374,18 @@ export function extractKiroDiscoveredModelRecords(payload: unknown): KiroDiscove
   return [];
 }
 
+export function buildKiroListModelsUrl(credentials: Pick<KiroOAuthCredentials, "region" | "profileArn">): string {
+  const url = new URL(`https://codewhisperer.${credentials.region}.amazonaws.com/`);
+  url.searchParams.set("origin", KIRO_LIST_MODELS_ORIGIN);
+  if (credentials.profileArn) {
+    url.searchParams.set("profileArn", credentials.profileArn);
+  }
+  return url.toString();
+}
+
+/** @deprecated Use buildKiroListModelsUrl instead. Kept for backward compatibility in tests. */
 export function buildKiroDiscoveryUrls(credentials: Pick<KiroOAuthCredentials, "region" | "profileArn">): string[] {
-  return KIRO_DISCOVERY_ENDPOINT_PATHS.map((path) => {
-    const url = new URL(`https://q.${credentials.region}.amazonaws.com${path}`);
-    url.searchParams.set("origin", "AI_EDITOR");
-    if (credentials.profileArn) {
-      url.searchParams.set("profileArn", credentials.profileArn);
-    }
-    return url.toString();
-  });
+  return [buildKiroListModelsUrl(credentials)];
 }
 
 export function mergeKiroNormalizedModels(
@@ -342,41 +435,44 @@ export async function discoverKiroModels(
   dependencies: KiroModelDiscoveryDependencies = {},
 ): Promise<KiroNormalizedModelDefinition[]> {
   const fetchImplementation = getFetchImplementation(dependencies);
-  const discoveryUrls = buildKiroDiscoveryUrls(credentials);
-  let lastError: Error | undefined;
+  const url = buildKiroListModelsUrl(credentials);
+  const allRecords: KiroDiscoveredModelRecord[] = [];
+  let nextToken: string | undefined;
 
-  for (const url of discoveryUrls) {
-    try {
-      const response = await fetchImplementation(url, {
-        method: "GET",
-        headers: {
-          Accept: "application/json",
-          Authorization: `Bearer ${credentials.access}`,
-          "Content-Type": "application/json",
-          "x-amzn-kiro-agent-mode": "vibe",
-          "amz-sdk-request": "attempt=1; max=1",
-        },
-      });
-
-      if (!response.ok) {
-        lastError = new Error(`Model discovery failed with HTTP ${response.status}.`);
-        continue;
-      }
-
-      const payload = (await response.json()) as unknown;
-      const records = extractKiroDiscoveredModelRecords(payload);
-      if (records.length === 0) {
-        lastError = new Error("Model discovery response did not contain any model records.");
-        continue;
-      }
-
-      return records.map(normalizeDiscoveredKiroModel);
-    } catch (error) {
-      lastError = error instanceof Error ? error : new Error(String(error));
+  do {
+    const body: Record<string, unknown> = {};
+    if (nextToken) {
+      body.nextToken = nextToken;
     }
+
+    const response = await fetchImplementation(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": KIRO_LIST_MODELS_CONTENT_TYPE,
+        "X-Amz-Target": KIRO_LIST_MODELS_TARGET,
+        Authorization: `Bearer ${credentials.access}`,
+        Accept: "application/json",
+        "amz-sdk-request": "attempt=1; max=3",
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (!response.ok) {
+      throw new Error(`ListAvailableModels failed with HTTP ${response.status}.`);
+    }
+
+    const payload = (await response.json()) as unknown;
+    const records = extractKiroDiscoveredModelRecords(payload);
+    allRecords.push(...records);
+
+    nextToken = isRecord(payload) && typeof payload.nextToken === "string" ? payload.nextToken : undefined;
+  } while (nextToken);
+
+  if (allRecords.length === 0) {
+    throw new Error("ListAvailableModels response did not contain any model records.");
   }
 
-  throw lastError ?? new Error("Kiro model discovery failed.");
+  return allRecords.map(normalizeDiscoveredKiroModel);
 }
 
 export async function discoverAndMergeKiroProviderModels(
@@ -399,10 +495,7 @@ export async function discoverAndMergeKiroProviderModels(
   } catch (error) {
     await logKiroError(dependencies, "model_discovery_error", error, {
       region: credentials.region,
-      discoveryUrls: buildKiroDiscoveryUrls(credentials).map((url) => {
-        const parsed = new URL(url);
-        return `${parsed.origin}${parsed.pathname}`;
-      }),
+      discoveryUrl: buildKiroListModelsUrl(credentials),
     });
 
     return fallbackModels.map((model) => ({

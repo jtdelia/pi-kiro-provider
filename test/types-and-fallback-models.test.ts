@@ -37,14 +37,22 @@ describe("kiro shared types and fallback models", () => {
     const fallbackIds = new Set<string>(KIRO_FALLBACK_MODEL_CATALOG.map((model) => model.id));
 
     expect(fallbackIds.has("auto")).toBe(true);
-    expect(fallbackIds.has("claude-sonnet-4")).toBe(false);
-    expect(fallbackIds.has("claude-3-7-sonnet")).toBe(false);
+    expect(fallbackIds.has("claude-sonnet-4")).toBe(true);
+    expect(fallbackIds.has("claude-opus-5")).toBe(true);
+    expect(fallbackIds.has("claude-opus-4.8")).toBe(true);
+    expect(fallbackIds.has("claude-opus-4.7")).toBe(true);
+    expect(fallbackIds.has("claude-sonnet-5")).toBe(true);
+    expect(fallbackIds.has("gpt-5.6-sol")).toBe(true);
+    expect(fallbackIds.has("gpt-5.6-terra")).toBe(true);
+    expect(fallbackIds.has("gpt-5.6-luna")).toBe(true);
+    expect(fallbackIds.has("deepseek-3.2")).toBe(true);
     expect(fallbackIds.has("minimax-m2.5")).toBe(true);
+    expect(fallbackIds.has("minimax-m2.1")).toBe(true);
     expect(fallbackIds.has("glm-5")).toBe(true);
     expect(fallbackIds.has("qwen3-coder-next")).toBe(true);
 
-    expect(fallbackIds.has("deepseek-3.2")).toBe(false);
-    expect(fallbackIds.has("minimax-m2.1")).toBe(false);
+    expect(fallbackIds.has("claude-3-7-sonnet")).toBe(false);
+    expect(fallbackIds.has("claude-fable-5")).toBe(false);
     expect(fallbackIds.has("nova-swe")).toBe(false);
     expect(fallbackIds.has("gpt-oss-120b")).toBe(false);
     expect(fallbackIds.has("kimi-k2-thinking")).toBe(false);
