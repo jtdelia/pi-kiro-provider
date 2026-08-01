@@ -35,8 +35,9 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.25.1",
-    "@mariozechner/pi-ai": "*",
-    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-ai": "0.73.1",
+    "@mariozechner/pi-coding-agent": "0.73.1",
+    "@sinclair/typebox": "0.34.52",
     "@types/node": "^24.0.0",
     "eslint": "^9.25.1",
     "globals": "^16.0.0",

@@ -35,6 +35,10 @@ You can also try it for one session without installing it permanently:
 pi -e git:github.com/jtdelia/pi-kiro-provider
 ```
 
+## Compatibility
+
+This extension targets the latest pi release. Its model-level `thinkingLevelMap` support requires pi 0.72 or newer; current pi releases support the `xhigh` capability advertised by this provider. The extension intentionally does not advertise `max` because Kiro's corresponding budget and semantics are not confirmed.
+
 ## Quick start
 
 1. Install the package.
