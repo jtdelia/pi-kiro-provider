@@ -156,9 +156,15 @@ describe("kiro logging", () => {
         {
           diagnostics: {
             toolResultTruncationCount: 2,
+            aggregateToolResultTruncationCount: 1,
             currentMessageTruncated: false,
             prunedHistoryMessageCount: 4,
-            finalPayloadChars: 123456,
+            removedHistoricalImageCount: 2,
+            removedOptionalToolDefinitionCount: 1,
+            finalPayloadUtf8Bytes: 123456,
+            maxRequestBodyBytes: 650000,
+            requestFitsBudget: true,
+            historyCharacterBudget: 500000,
           },
           authorization: "Bearer secret-token",
         },
@@ -173,9 +179,15 @@ describe("kiro logging", () => {
         context: {
           diagnostics: {
             toolResultTruncationCount: 2,
+            aggregateToolResultTruncationCount: 1,
             currentMessageTruncated: false,
             prunedHistoryMessageCount: 4,
-            finalPayloadChars: 123456,
+            removedHistoricalImageCount: 2,
+            removedOptionalToolDefinitionCount: 1,
+            finalPayloadUtf8Bytes: 123456,
+            maxRequestBodyBytes: 650000,
+            requestFitsBudget: true,
+            historyCharacterBudget: 500000,
           },
           authorization: "[REDACTED]",
         },

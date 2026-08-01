@@ -18,6 +18,8 @@ import { createKiroOAuthProviderConfig, type KiroLoginDependencies } from "./aut
 import { logKiroError, logKiroInfo } from "./logging";
 import { discoverAndMergeKiroProviderModels, getKiroInitialProviderModels } from "./models";
 import {
+  KIRO_MAX_REQUEST_BODY_BYTES,
+  KiroContextLengthExceededError,
   adaptPiContextToKiroRequest,
   buildKiroHttpErrorMessage,
   buildKiroTransportRequest,
@@ -211,7 +213,13 @@ async function resolveKiroStreamCredentials(
 }
 
 export function createKiroStreamSimple(dependencies: KiroExtensionDependencies = {}) {
-  return function streamKiro(model: { api: Api; provider: string; id: string; headers?: Record<string, string> }, context: { messages: unknown[]; systemPrompt?: string; tools?: unknown[] }, options?: SimpleStreamOptions) {
+  return function streamKiro(model: {
+    api: Api;
+    provider: string;
+    id: string;
+    headers?: Record<string, string>;
+    contextWindow?: number;
+  }, context: { messages: unknown[]; systemPrompt?: string; tools?: unknown[] }, options?: SimpleStreamOptions) {
     const stream = createAssistantMessageEventStream();
 
     void (async () => {
@@ -226,6 +234,8 @@ export function createKiroStreamSimple(dependencies: KiroExtensionDependencies =
       let requestUrl: string | undefined;
       let responseStatus: number | undefined;
       let conversationId: string | undefined;
+      let finalPayloadUtf8Bytes: number | undefined;
+      let finalPayloadMeasuredAfterCallback = false;
 
       try {
         for (const event of adapter.start()) {
@@ -240,24 +250,12 @@ export function createKiroStreamSimple(dependencies: KiroExtensionDependencies =
           credentials,
           reasoning: options?.reasoning,
           conversationId,
+          contextWindow: model.contextWindow,
         });
 
-        if (
-          preparedRequest.diagnostics &&
-          (preparedRequest.diagnostics.toolResultTruncationCount > 0 ||
-            preparedRequest.diagnostics.currentMessageTruncated ||
-            preparedRequest.diagnostics.prunedHistoryMessageCount > 0)
-        ) {
-          await logKiroInfo(dependencies, "request_budget_applied", "Kiro request budget applied.", {
-            modelId: model.id,
-            provider: model.provider,
-            api: model.api,
-            conversationId,
-            diagnostics: preparedRequest.diagnostics,
-          });
-        }
-
         const nextPayload = await options?.onPayload?.(preparedRequest.payload, model as never);
+        finalPayloadMeasuredAfterCallback = nextPayload !== undefined;
+        requestUrl = preparedRequest.endpoint;
         const request = buildKiroTransportRequest({
           preparedRequest: {
             ...preparedRequest,
@@ -270,6 +268,33 @@ export function createKiroStreamSimple(dependencies: KiroExtensionDependencies =
           },
           signal: options?.signal,
         });
+        finalPayloadUtf8Bytes = request.serializedPayload.utf8Bytes;
+
+        const diagnostics = preparedRequest.diagnostics
+          ? {
+              ...preparedRequest.diagnostics,
+              finalPayloadUtf8Bytes,
+              requestFitsBudget: true,
+              payloadModifiedByCallback: finalPayloadMeasuredAfterCallback || undefined,
+            }
+          : undefined;
+        if (
+          diagnostics &&
+          (diagnostics.toolResultTruncationCount > 0 ||
+            diagnostics.aggregateToolResultTruncationCount > 0 ||
+            diagnostics.currentMessageTruncated ||
+            diagnostics.prunedHistoryMessageCount > 0 ||
+            diagnostics.removedHistoricalImageCount > 0 ||
+            diagnostics.removedOptionalToolDefinitionCount > 0)
+        ) {
+          await logKiroInfo(dependencies, "request_budget_applied", "Kiro request budget applied.", {
+            modelId: model.id,
+            provider: model.provider,
+            api: model.api,
+            conversationId,
+            diagnostics,
+          });
+        }
 
         requestUrl = request.url;
 
@@ -344,6 +369,20 @@ export function createKiroStreamSimple(dependencies: KiroExtensionDependencies =
       } catch (error) {
         const reason = aborted || options?.signal?.aborted ? "aborted" : "error";
         const message = error instanceof Error ? error.message : String(error);
+
+        if (message.startsWith("context_length_exceeded:")) {
+          const budgetError = error instanceof KiroContextLengthExceededError ? error : undefined;
+          await logKiroInfo(dependencies, "request_budget_exceeded", "Kiro request budget exceeded.", {
+            modelId: model.id,
+            provider: model.provider,
+            api: model.api,
+            conversationId,
+            responseStatus,
+            finalPayloadUtf8Bytes: budgetError?.utf8Bytes ?? finalPayloadUtf8Bytes,
+            maxRequestBodyBytes: budgetError?.maxRequestBodyBytes ?? KIRO_MAX_REQUEST_BODY_BYTES,
+            measuredAfterCallback: finalPayloadMeasuredAfterCallback,
+          });
+        }
 
         await logKiroError(dependencies, "request_error", error, {
           reason,
