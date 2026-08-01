@@ -92,7 +92,15 @@ describe("kiro streamSimple transport", () => {
         }),
         createEventStreamMessage("messageDeltaEvent", {
           delta: { stop_reason: "end_turn" },
-          usage: { input_tokens: 10, output_tokens: 2 },
+        }),
+        createEventStreamMessage("metadataEvent", {
+          tokenUsage: {
+            uncachedInputTokens: 10,
+            outputTokens: 2,
+            cacheReadInputTokens: 3,
+            cacheWriteInputTokens: 1,
+            totalTokens: 16,
+          },
         }),
       ]);
     });
@@ -150,10 +158,59 @@ describe("kiro streamSimple transport", () => {
     const done = events.at(-1) as { type: string; message?: { content: unknown; usage: { input: number; output: number } } };
     expect(done.type).toBe("done");
     expect(done.message?.content).toEqual([{ type: "text", text: "Hello world" }]);
-    expect(done.message?.usage).toMatchObject({ input: 10, output: 2 });
+    expect(done.message?.usage).toMatchObject({
+      input: 10,
+      output: 2,
+      cacheRead: 3,
+      cacheWrite: 1,
+      totalTokens: 16,
+    });
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("logs opt-in stream event shapes without response content", async () => {
+    const appendLogFile = vi.fn(async (_path: string, content: string) => {
+      expect(content).not.toContain("Hello secret response");
+      expect(content).not.toContain("Bearer secret-token");
+      expect(content).toContain("stream_event_shape");
+    });
+    const fetchMock = vi.fn(async () =>
+      createEventStreamResponse([
+        createEventStreamMessage("assistantResponseEvent", { content: "Hello secret response" }),
+        createEventStreamMessage("metadataEvent", {
+          tokenUsage: { uncachedInputTokens: 1, outputTokens: 2, totalTokens: 3 },
+          authorization: "Bearer secret-token",
+        }),
+      ]),
+    );
+    const provider = createKiroProviderConfig({
+      env: { KIRO_DEBUG_STREAM_EVENTS: "1" },
+      appendLogFile,
+      fetch: fetchMock as unknown as typeof fetch,
+      readAuthFile: async () =>
+        JSON.stringify({
+          kiro: {
+            type: "oauth",
+            access: "stored-access-token",
+            refresh: "refresh-token",
+            expires: Date.now() + 60_000,
+            authMode: "builder-id",
+            region: "us-east-1",
+            oidcRegion: "us-east-1",
+            clientId: "client-id",
+            clientSecret: "client-secret",
+          },
+        }),
+    });
+
+    const stream = provider.streamSimple?.(
+      { id: "claude-sonnet-4", api: KIRO_CUSTOM_API, provider: KIRO_PROVIDER_NAME } as never,
+      { messages: [{ role: "user", content: "hello", timestamp: 1 }] } as never,
+    );
+
+    await collectStreamEvents(requireStream(stream));
+    expect(appendLogFile).toHaveBeenCalled();
+  });
   it("rejects an oversized callback payload before fetch", async () => {
     const fetchMock = vi.fn(async () => createEventStreamResponse([]));
     const provider = createKiroProviderConfig({

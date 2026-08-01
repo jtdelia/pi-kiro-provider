@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   convertKiroStreamChunksToAssistantEvents,
   convertKiroStreamEventsToAssistantEvents,
+  summarizeKiroStreamEvent,
 } from "../extensions/kiro/stream";
 
 const model = {
@@ -12,6 +13,32 @@ const model = {
 } as const;
 
 describe("kiro stream adapter", () => {
+  it("summarizes event shape without including content or secrets", () => {
+    expect(
+      summarizeKiroStreamEvent({
+        metadataEvent: {
+          tokenUsage: { uncachedInputTokens: 10, outputTokens: 2 },
+          content: "do not log this",
+          authorization: "Bearer secret-token",
+        },
+      }),
+    ).toEqual({
+      eventType: "metadataEvent",
+      keys: [
+        "metadataEvent",
+        "metadataEvent.tokenUsage",
+        "metadataEvent.tokenUsage.uncachedInputTokens",
+        "metadataEvent.tokenUsage.outputTokens",
+        "metadataEvent.content",
+        "metadataEvent.authorization",
+      ],
+      numericFields: [
+        { path: "metadataEvent.tokenUsage.uncachedInputTokens", value: 10 },
+        { path: "metadataEvent.tokenUsage.outputTokens", value: 2 },
+      ],
+    });
+  });
+
   it("plain text stream emits correct event order", () => {
     const events = convertKiroStreamEventsToAssistantEvents({
       model,

@@ -20,6 +20,7 @@ It adds a `kiro` provider to pi, integrates with `/login`, supports AWS Builder 
 - Supports tool calls
 - Supports manual `profileArn` configuration for enterprise IAM Identity Center setups
 - Exposes `xhigh` thinking for reasoning-capable Kiro models
+- Persists API-reported Kiro token usage in pi session records when the response includes it
 
 ## Install
 
@@ -85,6 +86,20 @@ Flow:
 5. Enter the AWS region for sign-in.
 6. pi opens your organization's AWS device page.
 7. Complete sign-in in the browser.
+
+## Token usage
+
+Kiro usage is read from response metadata when the API supplies it. The adapter accepts both snake_case fields and Kiro's camelCase fields, including `uncachedInputTokens`, `outputTokens`, `cacheReadInputTokens`, `cacheWriteInputTokens`, and `totalTokens`. Usage events may arrive independently of the terminal event and are retained for the final assistant message.
+
+The provider never estimates token counts from visible prompt or response text. If Kiro does not send usage totals for a request or model, pi session usage remains unavailable/zero rather than presenting fabricated totals.
+
+For opt-in stream inspection, set:
+
+```bash
+export KIRO_DEBUG_STREAM_EVENTS=1
+```
+
+The diagnostic log records only the decoded event type, nested field keys, and numeric fields. It does not record content, tool arguments, credentials, or response bodies. Entries are written to the normal Kiro log (`~/.pi/agent/kiro.log` unless configured otherwise).
 
 ## Enterprise `profileArn` setup
 
@@ -207,4 +222,6 @@ Current coverage includes:
 - request adaptation
 - text streaming and thinking events
 - tool-call handling
+- camelCase Kiro token usage and pi usage persistence
+- opt-in stream event diagnostics
 - enterprise config and error paths

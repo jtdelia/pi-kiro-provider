@@ -18,6 +18,7 @@ type KiroUsagePayload = {
   output_tokens?: number;
   cache_creation_input_tokens?: number;
   cache_read_input_tokens?: number;
+  total_tokens?: number;
 };
 
 type KiroNormalizedStreamEvent =
@@ -41,6 +42,7 @@ interface KiroStreamAdapterState {
   thinkingBlockIndex: number | null;
   toolCalls: Map<string, KiroToolCallState>;
   stopReason: StopReason;
+  reportedTotalTokens?: number;
   started: boolean;
   terminal: boolean;
 }
@@ -75,6 +77,46 @@ function readString(value: unknown): string | undefined {
 
 function readBoolean(value: unknown): boolean | undefined {
   return typeof value === "boolean" ? value : undefined;
+}
+
+function readNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function normalizeUsage(value: unknown): KiroUsagePayload | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  const usage = isRecord(value.tokenUsage) ? value.tokenUsage : value;
+  const normalized: KiroUsagePayload = {
+    input_tokens: readNumber(usage.input_tokens) ?? readNumber(usage.uncachedInputTokens) ?? readNumber(usage.inputTokens),
+    output_tokens: readNumber(usage.output_tokens) ?? readNumber(usage.outputTokens),
+    cache_creation_input_tokens:
+      readNumber(usage.cache_creation_input_tokens) ??
+      readNumber(usage.cacheWriteInputTokens) ??
+      readNumber(usage.cacheCreationInputTokens),
+    cache_read_input_tokens:
+      readNumber(usage.cache_read_input_tokens) ??
+      readNumber(usage.cacheReadInputTokens),
+    total_tokens: readNumber(usage.total_tokens) ?? readNumber(usage.totalTokens),
+  };
+
+  return Object.values(normalized).some((field) => field !== undefined) ? normalized : undefined;
+}
+
+function getEventUsage(event: Record<string, unknown>): KiroUsagePayload | undefined {
+  const metadataEvent = isRecord(event.metadataEvent)
+    ? event.metadataEvent
+    : isRecord(event.messageMetadataEvent)
+      ? event.messageMetadataEvent
+      : isRecord(event.contextUsageEvent)
+        ? event.contextUsageEvent
+        : undefined;
+
+  return normalizeUsage(event.usage) ??
+    normalizeUsage(event.tokenUsage) ??
+    (metadataEvent ? normalizeUsage(metadataEvent) : undefined);
 }
 
 function createEmptyUsage(): AssistantMessage["usage"] {
@@ -303,12 +345,16 @@ function applyUsage(state: KiroStreamAdapterState, usage?: KiroUsagePayload): vo
   if (typeof usage.cache_creation_input_tokens === "number") {
     state.output.usage.cacheWrite = usage.cache_creation_input_tokens;
   }
+  if (typeof usage.total_tokens === "number") {
+    state.reportedTotalTokens = usage.total_tokens;
+  }
 
   state.output.usage.totalTokens =
-    state.output.usage.input +
-    state.output.usage.output +
-    state.output.usage.cacheRead +
-    state.output.usage.cacheWrite;
+    state.reportedTotalTokens ??
+    (state.output.usage.input +
+      state.output.usage.output +
+      state.output.usage.cacheRead +
+      state.output.usage.cacheWrite);
 }
 
 function mapKiroStopReason(stopReason?: string): StopReason {
@@ -457,6 +503,8 @@ function normalizeKiroEvent(event: unknown): KiroNormalizedStreamEvent | undefin
     return undefined;
   }
 
+  const eventUsage = getEventUsage(event);
+
   if (typeof event.type === "string") {
     switch (event.type) {
       case "assistantResponseEvent":
@@ -466,21 +514,12 @@ function normalizeKiroEvent(event: unknown): KiroNormalizedStreamEvent | undefin
         break;
       case "toolUseEvent":
         return normalizeToolUseEvent(event);
+      case "metadataEvent":
+      case "messageMetadataEvent":
+      case "contextUsageEvent":
+        return eventUsage ? { type: "stop", usage: eventUsage } : undefined;
       case "message_delta": {
-        const usage = isRecord(event.usage)
-          ? {
-              input_tokens: typeof event.usage.input_tokens === "number" ? event.usage.input_tokens : undefined,
-              output_tokens: typeof event.usage.output_tokens === "number" ? event.usage.output_tokens : undefined,
-              cache_creation_input_tokens:
-                typeof event.usage.cache_creation_input_tokens === "number"
-                  ? event.usage.cache_creation_input_tokens
-                  : undefined,
-              cache_read_input_tokens:
-                typeof event.usage.cache_read_input_tokens === "number"
-                  ? event.usage.cache_read_input_tokens
-                  : undefined,
-            }
-          : undefined;
+        const usage = normalizeUsage(event.usage);
         const delta = isRecord(event.delta) ? event.delta : undefined;
         return {
           type: "stop",
@@ -517,24 +556,24 @@ function normalizeKiroEvent(event: unknown): KiroNormalizedStreamEvent | undefin
     return normalizeToolUseEvent(event.toolUseEvent);
   }
 
-  if (isRecord(event.messageDeltaEvent)) {
-    const delta = isRecord(event.messageDeltaEvent.delta) ? event.messageDeltaEvent.delta : undefined;
-    const usage = isRecord(event.messageDeltaEvent.usage) ? event.messageDeltaEvent.usage : undefined;
+  if (eventUsage) {
+    const delta = isRecord(event.messageDeltaEvent) && isRecord(event.messageDeltaEvent.delta)
+      ? event.messageDeltaEvent.delta
+      : undefined;
     return {
       type: "stop",
       stopReason: readString(delta?.stop_reason),
-      usage: usage
-        ? {
-            input_tokens: typeof usage.input_tokens === "number" ? usage.input_tokens : undefined,
-            output_tokens: typeof usage.output_tokens === "number" ? usage.output_tokens : undefined,
-            cache_creation_input_tokens:
-              typeof usage.cache_creation_input_tokens === "number"
-                ? usage.cache_creation_input_tokens
-                : undefined,
-            cache_read_input_tokens:
-              typeof usage.cache_read_input_tokens === "number" ? usage.cache_read_input_tokens : undefined,
-          }
-        : undefined,
+      usage: eventUsage,
+    };
+  }
+
+  if (isRecord(event.messageDeltaEvent)) {
+    const delta = isRecord(event.messageDeltaEvent.delta) ? event.messageDeltaEvent.delta : undefined;
+    const usage = normalizeUsage(event.messageDeltaEvent.usage);
+    return {
+      type: "stop",
+      stopReason: readString(delta?.stop_reason),
+      usage,
     };
   }
 
@@ -797,6 +836,7 @@ export function createKiroStreamEventAdapter(input: {
     thinkingBlockIndex: null,
     toolCalls: new Map(),
     stopReason: "stop",
+    reportedTotalTokens: undefined,
     started: false,
     terminal: false,
   };
@@ -836,7 +876,9 @@ export function createKiroStreamEventAdapter(input: {
       }
 
       if (event.type === "stop") {
-        state.stopReason = mapKiroStopReason(event.stopReason);
+        if (event.stopReason !== undefined) {
+          state.stopReason = mapKiroStopReason(event.stopReason);
+        }
         applyUsage(state, event.usage);
         return events;
       }
@@ -955,7 +997,9 @@ function parseKiroEventStreamMessage(message: {
     case "messageDeltaEvent":
       return isRecord(parsedBody) ? { messageDeltaEvent: parsedBody } : undefined;
     case "contextUsageEvent":
-      return isRecord(parsedBody) ? { contextUsageEvent: parsedBody } : undefined;
+    case "metadataEvent":
+    case "messageMetadataEvent":
+      return isRecord(parsedBody) ? { [eventType]: parsedBody } : undefined;
     default:
       return isRecord(parsedBody) ? parsedBody : undefined;
   }
@@ -1025,6 +1069,42 @@ export function createKiroResponseStreamDecoder(): KiroResponseStreamDecoder {
       return events;
     },
   };
+}
+
+export interface KiroStreamEventDiagnostics {
+  eventType?: string;
+  keys: string[];
+  numericFields: Array<{ path: string; value: number }>;
+}
+
+export function summarizeKiroStreamEvent(event: unknown): KiroStreamEventDiagnostics {
+  const keys: string[] = [];
+  const numericFields: Array<{ path: string; value: number }> = [];
+
+  const visit = (value: unknown, path: string, depth: number): void => {
+    if (depth > 4 || keys.length >= 100) {
+      return;
+    }
+
+    if (isRecord(value)) {
+      for (const [key, child] of Object.entries(value)) {
+        const childPath = path ? `${path}.${key}` : key;
+        keys.push(childPath);
+        if (typeof child === "number" && Number.isFinite(child)) {
+          numericFields.push({ path: childPath, value: child });
+        } else if (isRecord(child)) {
+          visit(child, childPath, depth + 1);
+        }
+      }
+    }
+  };
+
+  visit(event, "", 0);
+  const eventRecord = isRecord(event) ? event : undefined;
+  const eventType = readString(eventRecord?.type) ??
+    (eventRecord ? Object.keys(eventRecord).find((key) => key.endsWith("Event")) : undefined);
+
+  return { eventType, keys, numericFields };
 }
 
 export function parseKiroSseChunks(chunks: readonly string[]): unknown[] {
