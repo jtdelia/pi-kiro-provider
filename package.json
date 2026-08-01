@@ -1,6 +1,6 @@
 {
   "name": "pi-kiro-provider",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Kiro provider extension package for pi.",
   "type": "module",
   "keywords": [
