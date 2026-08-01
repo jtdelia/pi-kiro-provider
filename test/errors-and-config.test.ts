@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createKiroLogin } from "../extensions/kiro/auth";
 import { createKiroProviderConfig, loadKiroRuntimeConfig } from "../extensions/kiro/index";
 import { createKiroRefreshToken } from "../extensions/kiro/refresh";
+import { buildKiroHttpErrorMessage, isKiroContextLengthExceededError } from "../extensions/kiro/request";
 import {
   KIRO_AUTH_MODES,
   KIRO_CUSTOM_API,
@@ -39,6 +40,19 @@ const identityCenterCredentials: KiroOAuthCredentials = {
 };
 
 describe("kiro enterprise config and errors", () => {
+  it("classifies only confirmed Kiro context overflows", () => {
+    expect(isKiroContextLengthExceededError({ status: 413, bodyText: "anything" })).toBe(true);
+    expect(isKiroContextLengthExceededError({ status: 400, bodyText: "CONTENT_LENGTH_EXCEEDS_THRESHOLD" })).toBe(true);
+    expect(isKiroContextLengthExceededError({ status: 400, bodyText: "Input is too long" })).toBe(true);
+    expect(isKiroContextLengthExceededError({ status: 400, bodyText: "REQUEST_BODY_INVALID" })).toBe(false);
+    expect(isKiroContextLengthExceededError({ status: 400, bodyText: "Improperly formed request." })).toBe(false);
+
+    expect(buildKiroHttpErrorMessage({ status: 413, statusText: "Payload Too Large" }, "request-secret"))
+      .toBe("context_length_exceeded: Kiro request failed with HTTP 413: request-secret");
+    expect(buildKiroHttpErrorMessage({ status: 400, statusText: "Bad Request" }, "REQUEST_BODY_INVALID"))
+      .toBe("Kiro request failed with HTTP 400: REQUEST_BODY_INVALID");
+  });
+
   it("loads profileArn from the documented config file shape", async () => {
     const config = await loadKiroRuntimeConfig({
       env: {},

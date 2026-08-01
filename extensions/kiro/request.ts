@@ -18,6 +18,8 @@ import type {
   KiroPreparedRequest,
   KiroRequestAdapterInput,
   KiroRequestImage,
+  KiroRequestPayload,
+  KiroSerializedPayload,
   KiroThinkingConfig,
   KiroToolDefinition,
   KiroToolResult,
@@ -48,9 +50,10 @@ const KIRO_THINKING_BUDGETS: Record<ThinkingLevel, number> = {
 const KIRO_TRUNCATION_TOKEN = "... [TRUNCATED] ...";
 const KIRO_TRUNCATION_MARKER = `\n${KIRO_TRUNCATION_TOKEN}\n`;
 const KIRO_MAX_TOOL_RESULT_TEXT_CHARS = 100_000;
-const KIRO_MAX_CURRENT_MESSAGE_TEXT_CHARS = 120_000;
-const KIRO_MAX_HISTORY_SERIALIZED_CHARS = 500_000;
-const KIRO_MAX_PAYLOAD_SERIALIZED_CHARS = 650_000;
+export const KIRO_MAX_CURRENT_TOOL_RESULT_TEXT_CHARS = 200_000;
+const KIRO_DEFAULT_HISTORY_CHARACTER_BUDGET = 500_000;
+/** Conservative client guardrail, not a documented Kiro service limit. */
+export const KIRO_MAX_REQUEST_BODY_BYTES = 650_000;
 
 export interface KiroTransportRequestInput {
   preparedRequest: Pick<KiroPreparedRequest, "endpoint" | "payload">;
@@ -58,6 +61,68 @@ export interface KiroTransportRequestInput {
   headers?: Record<string, string>;
   signal?: AbortSignal;
   requestId?: string;
+}
+
+export function serializeKiroPayload(payload: KiroRequestPayload): KiroSerializedPayload {
+  const body = JSON.stringify(payload);
+  return {
+    body,
+    utf8Bytes: Buffer.byteLength(body, "utf8"),
+  };
+}
+
+export function getKiroHistoryCharacterBudget(contextWindow?: number): number {
+  if (typeof contextWindow !== "number" || !Number.isFinite(contextWindow) || contextWindow <= 0) {
+    return KIRO_DEFAULT_HISTORY_CHARACTER_BUDGET;
+  }
+
+  return Math.floor((contextWindow / 200_000) * 850_000);
+}
+
+export class KiroContextLengthExceededError extends Error {
+  readonly utf8Bytes: number;
+  readonly maxRequestBodyBytes: number;
+
+  constructor(input: {
+    utf8Bytes: number;
+    reductions?: {
+      prunedHistoryMessageCount: number;
+      removedHistoricalImageCount: number;
+      aggregateToolResultTruncationCount: number;
+      removedOptionalToolDefinitionCount: number;
+    };
+  }) {
+    const reductions = input.reductions
+      ? `; reductions: history=${input.reductions.prunedHistoryMessageCount}, historicalImages=${input.reductions.removedHistoricalImageCount}, aggregateToolResults=${input.reductions.aggregateToolResultTruncationCount}, optionalTools=${input.reductions.removedOptionalToolDefinitionCount}`
+      : "";
+    super(
+      `context_length_exceeded: Kiro request body is ${input.utf8Bytes} bytes, exceeding the ${KIRO_MAX_REQUEST_BODY_BYTES}-byte client guardrail${reductions}.`,
+    );
+    this.name = "KiroContextLengthExceededError";
+    this.utf8Bytes = input.utf8Bytes;
+    this.maxRequestBodyBytes = KIRO_MAX_REQUEST_BODY_BYTES;
+  }
+}
+
+function createKiroContextLengthExceededError(input: {
+  utf8Bytes: number;
+  reductions?: {
+    prunedHistoryMessageCount: number;
+    removedHistoricalImageCount: number;
+    aggregateToolResultTruncationCount: number;
+    removedOptionalToolDefinitionCount: number;
+  };
+}): KiroContextLengthExceededError {
+  return new KiroContextLengthExceededError(input);
+}
+
+export function assertKiroPayloadFitsBudget(payload: KiroRequestPayload): KiroSerializedPayload {
+  const serialized = serializeKiroPayload(payload);
+  if (serialized.utf8Bytes > KIRO_MAX_REQUEST_BODY_BYTES) {
+    throw createKiroContextLengthExceededError({ utf8Bytes: serialized.utf8Bytes });
+  }
+
+  return serialized;
 }
 
 function extractRegionFromProfileArn(profileArn?: string): string | undefined {
@@ -608,47 +673,200 @@ function sanitizeKiroHistory(history: readonly KiroConversationMessage[]): KiroC
   return sanitized;
 }
 
-function pruneKiroHistoryToSize(
+function cloneKiroUserInputMessage(message: KiroUserInputMessage): KiroUserInputMessage {
+  return {
+    ...message,
+    images: message.images ? [...message.images] : undefined,
+    userInputMessageContext: message.userInputMessageContext
+      ? {
+          ...message.userInputMessageContext,
+          tools: message.userInputMessageContext.tools ? [...message.userInputMessageContext.tools] : undefined,
+          toolResults: message.userInputMessageContext.toolResults?.map((toolResult) => ({
+            ...toolResult,
+            content: toolResult.content.map((part) => ({ ...part })),
+          })),
+        }
+      : undefined,
+  };
+}
+
+function cloneKiroHistory(history: readonly KiroConversationMessage[]): KiroConversationMessage[] {
+  return history.map((message) => ({
+    userInputMessage: message.userInputMessage ? cloneKiroUserInputMessage(message.userInputMessage) : undefined,
+    assistantResponseMessage: message.assistantResponseMessage
+      ? {
+          ...message.assistantResponseMessage,
+          toolUses: message.assistantResponseMessage.toolUses?.map((toolUse) => ({ ...toolUse })),
+        }
+      : undefined,
+  }));
+}
+
+function getCurrentToolResultIds(currentMessage: KiroUserInputMessage): Set<string> {
+  return new Set(currentMessage.userInputMessageContext?.toolResults?.map((toolResult) => toolResult.toolUseId) ?? []);
+}
+
+function findProtectedHistoryStart(
   history: readonly KiroConversationMessage[],
-  maxSerializedChars = KIRO_MAX_HISTORY_SERIALIZED_CHARS,
-): KiroConversationMessage[] {
-  let pruned = sanitizeKiroHistory(history);
-  let serializedSize = JSON.stringify(pruned).length;
+  protectedToolUseIds: ReadonlySet<string>,
+): number | undefined {
+  if (protectedToolUseIds.size === 0) {
+    return undefined;
+  }
 
-  while (serializedSize > maxSerializedChars && pruned.length > 2) {
-    pruned = pruned.slice(1);
-
-    while (pruned.length > 0 && !pruned[0]?.userInputMessage) {
-      pruned = pruned.slice(1);
+  let protectedStart: number | undefined;
+  for (let index = 0; index < history.length; index += 1) {
+    const hasProtectedToolUse = history[index]?.assistantResponseMessage?.toolUses?.some((toolUse) =>
+      protectedToolUseIds.has(toolUse.toolUseId),
+    );
+    if (!hasProtectedToolUse) {
+      continue;
     }
 
-    pruned = sanitizeKiroHistory(pruned);
-    serializedSize = JSON.stringify(pruned).length;
+    for (let userIndex = index - 1; userIndex >= 0; userIndex -= 1) {
+      if (history[userIndex]?.userInputMessage) {
+        protectedStart = protectedStart === undefined ? userIndex : Math.min(protectedStart, userIndex);
+        break;
+      }
+    }
+    protectedStart = protectedStart === undefined ? index : Math.min(protectedStart, index);
+  }
+
+  return protectedStart;
+}
+
+function pruneKiroHistoryToCharacterBudget(
+  history: readonly KiroConversationMessage[],
+  maxCharacters: number,
+  protectedToolUseIds: ReadonlySet<string>,
+): KiroConversationMessage[] {
+  let pruned = sanitizeKiroHistory(history);
+  while (JSON.stringify(pruned).length > maxCharacters && pruned.length > 0) {
+    const reduced = dropOldestKiroHistoryExchange(pruned, protectedToolUseIds);
+    if (reduced.length === pruned.length) {
+      break;
+    }
+    pruned = reduced;
   }
 
   return pruned;
 }
 
-function applyKiroCurrentMessageSizeBudget(currentMessage: KiroUserInputMessage): KiroUserInputMessage {
-  const nextMessage: KiroUserInputMessage = {
-    ...currentMessage,
-    content: truncateMiddle(currentMessage.content, KIRO_MAX_CURRENT_MESSAGE_TEXT_CHARS),
-  };
+function dropOldestKiroHistoryExchange(
+  history: readonly KiroConversationMessage[],
+  protectedToolUseIds: ReadonlySet<string>,
+): KiroConversationMessage[] {
+  const sanitized = sanitizeKiroHistory(history);
+  const nextUserIndex = sanitized.findIndex((message, index) => index > 0 && Boolean(message.userInputMessage));
+  const protectedStart = findProtectedHistoryStart(sanitized, protectedToolUseIds);
+  if (nextUserIndex === -1 || (protectedStart !== undefined && nextUserIndex > protectedStart)) {
+    return sanitized;
+  }
 
-  const toolResults = currentMessage.userInputMessageContext?.toolResults;
-  if (!toolResults || toolResults.length === 0) {
+  return sanitizeKiroHistory(sanitized.slice(nextUserIndex));
+}
+
+function stripHistoricalImages(history: readonly KiroConversationMessage[]): {
+  history: KiroConversationMessage[];
+  removedCount: number;
+} {
+  let removedCount = 0;
+  const stripped = cloneKiroHistory(history);
+  for (const entry of stripped) {
+    if (entry.userInputMessage?.images?.length) {
+      removedCount += entry.userInputMessage.images.length;
+      delete entry.userInputMessage.images;
+    }
+  }
+
+  return { history: stripped, removedCount };
+}
+
+function applyPerResultToolResultBudget(currentMessage: KiroUserInputMessage): KiroUserInputMessage {
+  const nextMessage = cloneKiroUserInputMessage(currentMessage);
+  const toolResults = nextMessage.userInputMessageContext?.toolResults;
+  if (!toolResults) {
     return nextMessage;
   }
 
-  nextMessage.userInputMessageContext = {
-    ...(currentMessage.userInputMessageContext ?? {}),
-    toolResults: toolResults.map((toolResult) => ({
-      ...toolResult,
-      content: toolResult.content.map((part) => ({
-        text: truncateToolResultText(part.text ?? ""),
-      })),
-    })),
-  };
+  for (const toolResult of toolResults) {
+    toolResult.content = toolResult.content.map((part) => ({
+      text: truncateToolResultText(part.text ?? ""),
+    }));
+  }
+
+  return nextMessage;
+}
+
+function applyAggregateToolResultBudget(currentMessage: KiroUserInputMessage): {
+  currentMessage: KiroUserInputMessage;
+  truncationCount: number;
+} {
+  const nextMessage = cloneKiroUserInputMessage(currentMessage);
+  const toolResults = nextMessage.userInputMessageContext?.toolResults;
+  if (!toolResults) {
+    return { currentMessage: nextMessage, truncationCount: 0 };
+  }
+
+  let remainingCharacters = KIRO_MAX_CURRENT_TOOL_RESULT_TEXT_CHARS;
+  let truncationCount = 0;
+  let nextContent = nextMessage.content;
+
+  for (const toolResult of toolResults) {
+    for (const part of toolResult.content) {
+      const originalText = part.text ?? "";
+      const budgetedText = remainingCharacters === 0
+        ? KIRO_TRUNCATION_TOKEN
+        : truncateMiddle(originalText, remainingCharacters);
+      if (budgetedText !== originalText) {
+        truncationCount += 1;
+        nextContent = nextContent.replace(originalText, budgetedText);
+      }
+      part.text = budgetedText;
+      remainingCharacters = Math.max(0, remainingCharacters - originalText.length);
+    }
+  }
+
+  nextMessage.content = nextContent;
+  return { currentMessage: nextMessage, truncationCount };
+}
+
+function removeOneOptionalToolDefinition(
+  history: readonly KiroConversationMessage[],
+  currentMessage: KiroUserInputMessage,
+): KiroUserInputMessage | undefined {
+  const tools = currentMessage.userInputMessageContext?.tools;
+  if (!tools?.length) {
+    return undefined;
+  }
+
+  const requiredNames = new Set(
+    history.flatMap((message) => message.assistantResponseMessage?.toolUses?.map((toolUse) => toolUse.name) ?? []),
+  );
+  let removableIndex = -1;
+  for (let index = tools.length - 1; index >= 0; index -= 1) {
+    if (!requiredNames.has(tools[index]!.toolSpecification.name)) {
+      removableIndex = index;
+      break;
+    }
+  }
+  if (removableIndex === -1) {
+    return undefined;
+  }
+
+  const nextMessage = cloneKiroUserInputMessage(currentMessage);
+  const nextTools = nextMessage.userInputMessageContext?.tools;
+  if (!nextTools) {
+    return undefined;
+  }
+
+  nextTools.splice(removableIndex, 1);
+  if (nextTools.length === 0) {
+    delete nextMessage.userInputMessageContext?.tools;
+    if (nextMessage.userInputMessageContext && Object.keys(nextMessage.userInputMessageContext).length === 0) {
+      delete nextMessage.userInputMessageContext;
+    }
+  }
 
   return nextMessage;
 }
@@ -850,42 +1068,85 @@ function fitKiroPayloadToSize(input: {
   history: readonly KiroConversationMessage[];
   currentMessage: KiroUserInputMessage;
   conversationId?: string;
+  profileArn?: string;
+  historyCharacterBudget: number;
 }): {
-  history: KiroConversationMessage[];
-  currentMessage: KiroUserInputMessage;
+  payload: KiroRequestPayload;
+  serialized: KiroSerializedPayload;
+  diagnostics: {
+    prunedHistoryMessageCount: number;
+    removedHistoricalImageCount: number;
+    aggregateToolResultTruncationCount: number;
+    removedOptionalToolDefinitionCount: number;
+  };
 } {
-  let history = pruneKiroHistoryToSize(input.history);
-  const currentMessage = applyKiroCurrentMessageSizeBudget(input.currentMessage);
+  const strippedHistory = stripHistoricalImages(input.history);
+  let currentMessage = applyPerResultToolResultBudget(input.currentMessage);
+  const protectedToolUseIds = getCurrentToolResultIds(currentMessage);
+  let history = pruneKiroHistoryToCharacterBudget(
+    strippedHistory.history,
+    input.historyCharacterBudget,
+    protectedToolUseIds,
+  );
+  let aggregateToolResultTruncationCount = 0;
+  let removedOptionalToolDefinitionCount = 0;
 
-  let payload = {
+  const buildPayload = (): KiroRequestPayload => ({
     conversationState: {
       chatTriggerType: KIRO_CHAT_TRIGGER_TYPE,
       conversationId: input.conversationId,
       history: history.length > 0 ? history : undefined,
-      currentMessage: {
-        userInputMessage: currentMessage,
-      },
+      currentMessage: { userInputMessage: currentMessage },
     },
-  };
+    profileArn: input.profileArn,
+  });
 
-  while (JSON.stringify(payload).length > KIRO_MAX_PAYLOAD_SERIALIZED_CHARS && history.length > 0) {
-    history = pruneKiroHistoryToSize(history.slice(1));
-    payload = {
-      conversationState: {
-        chatTriggerType: KIRO_CHAT_TRIGGER_TYPE,
-        conversationId: input.conversationId,
-        history: history.length > 0 ? history : undefined,
-        currentMessage: {
-          userInputMessage: currentMessage,
-        },
-      },
-    };
+  let payload = buildPayload();
+  let serialized = serializeKiroPayload(payload);
+
+  while (serialized.utf8Bytes > KIRO_MAX_REQUEST_BODY_BYTES && history.length > 0) {
+    const reduced = dropOldestKiroHistoryExchange(history, protectedToolUseIds);
+    if (reduced.length === history.length) {
+      break;
+    }
+    history = reduced;
+    payload = buildPayload();
+    serialized = serializeKiroPayload(payload);
   }
 
-  return {
-    history,
-    currentMessage,
+  const aggregateBudgeted = applyAggregateToolResultBudget(currentMessage);
+  currentMessage = aggregateBudgeted.currentMessage;
+  aggregateToolResultTruncationCount = aggregateBudgeted.truncationCount;
+  payload = buildPayload();
+  serialized = serializeKiroPayload(payload);
+
+  while (serialized.utf8Bytes > KIRO_MAX_REQUEST_BODY_BYTES) {
+    const withoutOptionalTool = removeOneOptionalToolDefinition(history, currentMessage);
+    if (!withoutOptionalTool) {
+      break;
+    }
+
+    currentMessage = withoutOptionalTool;
+    removedOptionalToolDefinitionCount += 1;
+    payload = buildPayload();
+    serialized = serializeKiroPayload(payload);
+  }
+
+  const diagnostics = {
+    prunedHistoryMessageCount: Math.max(0, input.history.length - history.length),
+    removedHistoricalImageCount: strippedHistory.removedCount,
+    aggregateToolResultTruncationCount,
+    removedOptionalToolDefinitionCount,
   };
+
+  if (serialized.utf8Bytes > KIRO_MAX_REQUEST_BODY_BYTES) {
+    throw createKiroContextLengthExceededError({
+      utf8Bytes: serialized.utf8Bytes,
+      reductions: diagnostics,
+    });
+  }
+
+  return { payload, serialized, diagnostics };
 }
 
 function buildKiroCurrentMessage(
@@ -972,25 +1233,16 @@ export function adaptPiContextToKiroRequest(input: KiroRequestAdapterInput): Kir
     effectiveSystemPrompt || undefined,
   );
   const currentWithHistoryTools = ensureHistoryToolDefinitions(injected.history, injected.currentMessage);
+  const historyCharacterBudget = getKiroHistoryCharacterBudget(input.contextWindow);
   const fitted = fitKiroPayloadToSize({
     history: injected.history,
     currentMessage: currentWithHistoryTools,
     conversationId: input.conversationId,
+    profileArn: input.credentials.profileArn,
+    historyCharacterBudget,
   });
   const endpoint = buildKiroRequestEndpoint(input.credentials);
   const region = resolveKiroRequestRegion(input.credentials);
-
-  const payload = {
-    conversationState: {
-      chatTriggerType: KIRO_CHAT_TRIGGER_TYPE,
-      conversationId: input.conversationId,
-      history: fitted.history.length > 0 ? fitted.history : undefined,
-      currentMessage: {
-        userInputMessage: fitted.currentMessage,
-      },
-    },
-    profileArn: input.credentials.profileArn,
-  };
 
   return {
     endpoint,
@@ -999,12 +1251,23 @@ export function adaptPiContextToKiroRequest(input: KiroRequestAdapterInput): Kir
     serviceModelId,
     effectiveSystemPrompt: effectiveSystemPrompt || undefined,
     thinkingConfig,
-    payload,
+    payload: fitted.payload,
     diagnostics: {
-      toolResultTruncationCount: countKiroToolResultTruncations(fitted.history, fitted.currentMessage),
-      currentMessageTruncated: fitted.currentMessage.content.includes(KIRO_TRUNCATION_TOKEN),
-      prunedHistoryMessageCount: Math.max(0, injected.history.length - fitted.history.length),
-      finalPayloadChars: JSON.stringify(payload).length,
+      toolResultTruncationCount: countKiroToolResultTruncations(
+        fitted.payload.conversationState.history ?? [],
+        fitted.payload.conversationState.currentMessage.userInputMessage,
+      ),
+      aggregateToolResultTruncationCount: fitted.diagnostics.aggregateToolResultTruncationCount,
+      currentMessageTruncated: fitted.payload.conversationState.currentMessage.userInputMessage.content.includes(
+        KIRO_TRUNCATION_TOKEN,
+      ),
+      prunedHistoryMessageCount: fitted.diagnostics.prunedHistoryMessageCount,
+      removedHistoricalImageCount: fitted.diagnostics.removedHistoricalImageCount,
+      removedOptionalToolDefinitionCount: fitted.diagnostics.removedOptionalToolDefinitionCount,
+      finalPayloadUtf8Bytes: fitted.serialized.utf8Bytes,
+      maxRequestBodyBytes: KIRO_MAX_REQUEST_BODY_BYTES,
+      requestFitsBudget: true,
+      historyCharacterBudget,
     },
   };
 }
@@ -1036,7 +1299,9 @@ export function buildKiroTransportHeaders(input: {
 export function buildKiroTransportRequest(input: KiroTransportRequestInput): {
   url: string;
   init: RequestInit;
+  serializedPayload: KiroSerializedPayload;
 } {
+  const serializedPayload = assertKiroPayloadFitsBudget(input.preparedRequest.payload);
   return {
     url: input.preparedRequest.endpoint,
     init: {
@@ -1046,13 +1311,30 @@ export function buildKiroTransportRequest(input: KiroTransportRequestInput): {
         headers: input.headers,
         requestId: input.requestId,
       }),
-      body: JSON.stringify(input.preparedRequest.payload),
+      body: serializedPayload.body,
       signal: input.signal,
     },
+    serializedPayload,
   };
+}
+
+export function isKiroContextLengthExceededError(input: { status: number; bodyText: string }): boolean {
+  if (input.status === 413) {
+    return true;
+  }
+
+  if (input.status !== 400) {
+    return false;
+  }
+
+  const detail = input.bodyText.toLowerCase();
+  return detail.includes("content_length_exceeds_threshold") || detail.includes("input is too long");
 }
 
 export function buildKiroHttpErrorMessage(response: Pick<Response, "status" | "statusText">, bodyText: string): string {
   const detail = sanitizeKiroLogString(bodyText.trim() || response.statusText || "request failed");
-  return `Kiro request failed with HTTP ${response.status}: ${detail}`;
+  const prefix = isKiroContextLengthExceededError({ status: response.status, bodyText })
+    ? "context_length_exceeded: "
+    : "";
+  return `${prefix}Kiro request failed with HTTP ${response.status}: ${detail}`;
 }

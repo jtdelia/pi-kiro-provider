@@ -144,6 +144,11 @@ export interface KiroRequestPayload {
   profileArn?: string;
 }
 
+export interface KiroSerializedPayload {
+  body: string;
+  utf8Bytes: number;
+}
+
 export interface KiroThinkingConfig {
   enabled: boolean;
   level?: ThinkingLevel;
@@ -158,13 +163,22 @@ export interface KiroRequestAdapterInput {
   reasoning?: ThinkingLevel;
   conversationId?: string;
   serviceModelId?: string;
+  /** Model context allocation only; it never changes the request-body byte cap. */
+  contextWindow?: number;
 }
 
 export interface KiroRequestDiagnostics {
   toolResultTruncationCount: number;
+  aggregateToolResultTruncationCount: number;
   currentMessageTruncated: boolean;
   prunedHistoryMessageCount: number;
-  finalPayloadChars: number;
+  removedHistoricalImageCount: number;
+  removedOptionalToolDefinitionCount: number;
+  finalPayloadUtf8Bytes: number;
+  maxRequestBodyBytes: number;
+  requestFitsBudget: boolean;
+  historyCharacterBudget: number;
+  payloadModifiedByCallback?: boolean;
 }
 
 export interface KiroPreparedRequest {

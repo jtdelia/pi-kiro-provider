@@ -2,6 +2,8 @@ import { EventStreamCodec } from "@smithy/eventstream-codec";
 import { describe, expect, it, vi } from "vitest";
 
 import { createKiroProviderConfig } from "../extensions/kiro/index";
+import { KIRO_MAX_REQUEST_BODY_BYTES, serializeKiroPayload } from "../extensions/kiro/request";
+import type { KiroRequestPayload } from "../extensions/kiro/types";
 import { KIRO_CUSTOM_API, KIRO_PROVIDER_NAME } from "../extensions/kiro/types";
 
 function createEventStreamMessage(eventType: string, body: unknown): Uint8Array {
@@ -149,6 +151,82 @@ describe("kiro streamSimple transport", () => {
     expect(done.type).toBe("done");
     expect(done.message?.content).toEqual([{ type: "text", text: "Hello world" }]);
     expect(done.message?.usage).toMatchObject({ input: 10, output: 2 });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects an oversized callback payload before fetch", async () => {
+    const fetchMock = vi.fn(async () => createEventStreamResponse([]));
+    const provider = createKiroProviderConfig({
+      fetch: fetchMock as unknown as typeof fetch,
+      readAuthFile: async () =>
+        JSON.stringify({
+          kiro: {
+            type: "oauth",
+            access: "stored-access-token",
+            refresh: "refresh-token",
+            expires: Date.now() + 60_000,
+            authMode: "builder-id",
+            region: "us-east-1",
+            oidcRegion: "us-east-1",
+            clientId: "client-id",
+            clientSecret: "client-secret",
+          },
+        }),
+    });
+    const stream = provider.streamSimple?.(
+      { id: "claude-sonnet-4", api: KIRO_CUSTOM_API, provider: KIRO_PROVIDER_NAME } as never,
+      { messages: [{ role: "user", content: "hello", timestamp: 1 }] } as never,
+      {
+        onPayload: async (payload: KiroRequestPayload) => ({
+          ...payload,
+          conversationState: {
+            ...payload.conversationState,
+            currentMessage: {
+              userInputMessage: {
+                ...payload.conversationState.currentMessage.userInputMessage,
+                content: "x".repeat(KIRO_MAX_REQUEST_BODY_BYTES),
+              },
+            },
+          },
+        }),
+      } as never,
+    );
+
+    const events = await collectStreamEvents(requireStream(stream));
+    const terminal = events.at(-1) as { type: string; error?: { errorMessage?: string } };
+    expect(terminal.type).toBe("error");
+    expect(terminal.error?.errorMessage).toContain("context_length_exceeded");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("sends the exact canonical body that is measured", async () => {
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      expect(Buffer.byteLength(String(init?.body), "utf8")).toBe(serializeKiroPayload(JSON.parse(String(init?.body))).utf8Bytes);
+      return createEventStreamResponse([]);
+    });
+    const provider = createKiroProviderConfig({
+      fetch: fetchMock as unknown as typeof fetch,
+      readAuthFile: async () =>
+        JSON.stringify({
+          kiro: {
+            type: "oauth",
+            access: "stored-access-token",
+            refresh: "refresh-token",
+            expires: Date.now() + 60_000,
+            authMode: "builder-id",
+            region: "us-east-1",
+            oidcRegion: "us-east-1",
+            clientId: "client-id",
+            clientSecret: "client-secret",
+          },
+        }),
+    });
+    const stream = provider.streamSimple?.(
+      { id: "claude-sonnet-4", api: KIRO_CUSTOM_API, provider: KIRO_PROVIDER_NAME } as never,
+      { messages: [{ role: "user", content: "😀", timestamp: 1 }] } as never,
+    );
+
+    await collectStreamEvents(requireStream(stream));
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 

@@ -5,9 +5,14 @@ import { describe, expect, it } from "vitest";
 import {
   adaptPiContextToKiroRequest,
   buildKiroRequestEndpoint,
+  buildKiroTransportRequest,
+  getKiroHistoryCharacterBudget,
+  KIRO_MAX_CURRENT_TOOL_RESULT_TEXT_CHARS,
+  KIRO_MAX_REQUEST_BODY_BYTES,
   convertPiToolDefinitions,
   convertToolResultMessageToKiroMessage,
   mapThinkingLevelToKiroThinkingConfig,
+  serializeKiroPayload,
 } from "../extensions/kiro/request";
 import type { KiroOAuthCredentials } from "../extensions/kiro/types";
 
@@ -273,8 +278,187 @@ describe("kiro request adapter", () => {
     const payloadText = JSON.stringify(prepared.payload);
     const firstHistoryUser = prepared.payload.conversationState.history?.find((entry) => entry.userInputMessage)?.userInputMessage;
 
-    expect(payloadText.length).toBeLessThan(650_000);
+    expect(Buffer.byteLength(payloadText, "utf8")).toBeLessThanOrEqual(KIRO_MAX_REQUEST_BODY_BYTES);
+    expect(prepared.diagnostics?.finalPayloadUtf8Bytes).toBe(Buffer.byteLength(payloadText, "utf8"));
     expect(firstHistoryUser?.content.startsWith("user-0-")).toBe(false);
     expect(prepared.payload.conversationState.currentMessage.userInputMessage.content).toBe("latest question");
+  });
+
+  it("serializes the final payload as UTF-8 bytes rather than JavaScript code units", () => {
+    const prepared = adaptPiContextToKiroRequest({
+      modelId: "claude-sonnet-4",
+      credentials,
+      context: { messages: [{ role: "user", content: "emoji: 😀 中文", timestamp: 1 }] },
+    });
+
+    const serialized = serializeKiroPayload(prepared.payload);
+    expect(serialized.utf8Bytes).toBe(Buffer.byteLength(serialized.body, "utf8"));
+    expect(serialized.utf8Bytes).toBeGreaterThan(serialized.body.length);
+
+    const transport = buildKiroTransportRequest({
+      preparedRequest: prepared,
+      accessToken: credentials.access,
+      requestId: "request-id",
+    });
+    expect(transport.init.body).toBe(serialized.body);
+    expect(transport.serializedPayload).toEqual(serialized);
+  });
+
+  it("removes historical images but preserves current-turn images", () => {
+    const image = { type: "image" as const, data: Buffer.from("image").toString("base64"), mimeType: "image/png" };
+    const prepared = adaptPiContextToKiroRequest({
+      modelId: "claude-sonnet-4",
+      credentials,
+      context: {
+        messages: [
+          { role: "user", content: [image], timestamp: 1 },
+          {
+            role: "assistant",
+            content: [{ type: "text", text: "I saw it." }],
+            api: "kiro-api",
+            provider: "kiro",
+            model: "claude-sonnet-4",
+            usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+            stopReason: "stop",
+            timestamp: 2,
+          },
+          { role: "user", content: [image], timestamp: 3 },
+        ],
+      },
+    });
+
+    expect(prepared.payload.conversationState.history?.[0]?.userInputMessage?.images).toBeUndefined();
+    expect(prepared.payload.conversationState.currentMessage.userInputMessage.images).toHaveLength(1);
+    expect(prepared.diagnostics?.removedHistoricalImageCount).toBe(1);
+  });
+
+  it("applies an aggregate current tool-result budget while retaining IDs and statuses", () => {
+    const messages: Message[] = [
+      {
+        role: "assistant",
+        content: Array.from({ length: 4 }, (_, index) => ({
+          type: "toolCall" as const,
+          id: `call-${index}`,
+          name: "read_file",
+          arguments: { path: `/tmp/${index}` },
+        })),
+        api: "kiro-api",
+        provider: "kiro",
+        model: "claude-sonnet-4",
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+        stopReason: "toolUse",
+        timestamp: 1,
+      },
+      ...Array.from({ length: 4 }, (_, index) => ({
+        role: "toolResult" as const,
+        toolCallId: `call-${index}`,
+        toolName: "read_file",
+        content: [{ type: "text" as const, text: String(index).repeat(100_000) }],
+        isError: index === 3,
+        timestamp: index + 2,
+      })),
+    ];
+    const prepared = adaptPiContextToKiroRequest({ modelId: "claude-sonnet-4", credentials, context: { messages } });
+    const results = prepared.payload.conversationState.currentMessage.userInputMessage.userInputMessageContext?.toolResults ?? [];
+
+    expect(prepared.diagnostics?.aggregateToolResultTruncationCount).toBeGreaterThan(0);
+    expect(results.map((result) => [result.toolUseId, result.status])).toEqual([
+      ["call-0", "success"],
+      ["call-1", "success"],
+      ["call-2", "success"],
+      ["call-3", "error"],
+    ]);
+    expect(results.reduce((total, result) => total + result.content.reduce((sum, part) => sum + (part.text?.length ?? 0), 0), 0)).toBeLessThanOrEqual(
+      KIRO_MAX_CURRENT_TOOL_RESULT_TEXT_CHARS + 3 * "... [TRUNCATED] ...".length,
+    );
+  });
+
+  it("retains the declaring tool-use exchange when byte pruning current tool results", () => {
+    const messages: Message[] = [];
+    for (let index = 0; index < 5; index += 1) {
+      messages.push(
+        { role: "user", content: `old-user-${index}-${"x".repeat(100_000)}`, timestamp: index * 2 + 1 },
+        {
+          role: "assistant",
+          content: [{ type: "text", text: `old-assistant-${index}-${"x".repeat(100_000)}` }],
+          api: "kiro-api",
+          provider: "kiro",
+          model: "claude-sonnet-4",
+          usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+          stopReason: "stop",
+          timestamp: index * 2 + 2,
+        },
+      );
+    }
+    messages.push(
+      { role: "user", content: "run the protected tool", timestamp: 20 },
+      {
+        role: "assistant",
+        content: [{ type: "toolCall", id: "protected-call", name: "read_file", arguments: { path: "/tmp/file" } }],
+        api: "kiro-api",
+        provider: "kiro",
+        model: "claude-sonnet-4",
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+        stopReason: "toolUse",
+        timestamp: 21,
+      },
+      {
+        role: "toolResult",
+        toolCallId: "protected-call",
+        toolName: "read_file",
+        content: [{ type: "text", text: "result".repeat(20_000) }],
+        isError: false,
+        timestamp: 22,
+      },
+    );
+
+    const prepared = adaptPiContextToKiroRequest({
+      modelId: "claude-sonnet-4",
+      credentials,
+      contextWindow: 400_000,
+      context: { messages },
+    });
+    const history = prepared.payload.conversationState.history ?? [];
+    const resultIds = new Set(
+      prepared.payload.conversationState.currentMessage.userInputMessage.userInputMessageContext?.toolResults?.map(
+        (result) => result.toolUseId,
+      ),
+    );
+    const historyToolUseIds = new Set(
+      history.flatMap((entry) => entry.assistantResponseMessage?.toolUses?.map((toolUse) => toolUse.toolUseId) ?? []),
+    );
+
+    expect(prepared.diagnostics?.prunedHistoryMessageCount).toBeGreaterThan(0);
+    expect([...resultIds].every((id) => historyToolUseIds.has(id))).toBe(true);
+    expect(history.some((entry) => entry.userInputMessage?.content === "run the protected tool")).toBe(true);
+  });
+
+  it("fails closed when protected current content or profileArn exceeds the byte guardrail", () => {
+    const oversizedPrompt = "x".repeat(KIRO_MAX_REQUEST_BODY_BYTES);
+    expect(() => adaptPiContextToKiroRequest({
+      modelId: "claude-sonnet-4",
+      credentials,
+      context: { messages: [{ role: "user", content: oversizedPrompt, timestamp: 1 }] },
+    })).toThrow("context_length_exceeded");
+
+    expect(() => adaptPiContextToKiroRequest({
+      modelId: "claude-sonnet-4",
+      credentials: { ...credentials, profileArn: "a".repeat(KIRO_MAX_REQUEST_BODY_BYTES) },
+      context: { messages: [{ role: "user", content: "hello", timestamp: 1 }] },
+    })).toThrow("context_length_exceeded");
+  });
+
+  it("scales history allocation from model context without changing the body guardrail", () => {
+    expect(getKiroHistoryCharacterBudget()).toBe(500_000);
+    expect(getKiroHistoryCharacterBudget(200_000)).toBe(850_000);
+    expect(getKiroHistoryCharacterBudget(400_000)).toBe(1_700_000);
+
+    const prepared = adaptPiContextToKiroRequest({
+      modelId: "claude-sonnet-4",
+      credentials,
+      contextWindow: 400_000,
+      context: { messages: [{ role: "user", content: "hello", timestamp: 1 }] },
+    });
+    expect(prepared.diagnostics).toMatchObject({ historyCharacterBudget: 1_700_000, maxRequestBodyBytes: KIRO_MAX_REQUEST_BODY_BYTES });
   });
 });
