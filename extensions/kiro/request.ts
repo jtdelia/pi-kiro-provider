@@ -1009,7 +1009,10 @@ function alignCurrentToolResultsWithHistory(input: {
 
   const history = [...input.history];
   if (syntheticToolUses.length > 0) {
-    if (history.at(-1)?.assistantResponseMessage) {
+    // A synthetic assistant `toolUses` turn must follow a user turn to preserve alternation and,
+    // when history is empty, to give the request a valid user head. Insert a placeholder user
+    // turn unless the last history turn is already a user turn.
+    if (history.length === 0 || Boolean(history.at(-1)?.assistantResponseMessage)) {
       history.push({
         userInputMessage: {
           content: KIRO_RUNNING_TOOLS_MESSAGE,
@@ -1069,9 +1072,54 @@ function countKiroToolResultTruncations(history: readonly KiroConversationMessag
   return history.reduce((total, entry) => total + countTruncations(entry.userInputMessage), 0) + countTruncations(currentMessage);
 }
 
+/**
+ * Repair the history that will be sent on the wire so that, combined with the trailing
+ * `currentMessage` (always a user turn), it satisfies Kiro's structural rules and avoids
+ * `REQUEST_BODY_INVALID`. Pruning slices history from the front and can strand it in shapes
+ * that are individually valid but invalid once `currentMessage` is appended:
+ *
+ *  - a leading orphaned tool-result user turn (its owning assistant was pruned away),
+ *  - a leading assistant turn with no user head (e.g. only the protected assistant that owns
+ *    the current turn's tool results survived pruning),
+ *  - a trailing user turn, which would sit adjacent to the current user turn.
+ *
+ * `modelId` is used for any synthesized user turn so it matches the request's service model.
+ */
+function repairKiroWireHistory(
+  history: readonly KiroConversationMessage[],
+  modelId: string,
+): KiroConversationMessage[] {
+  let repaired = [...history];
+
+  // Drop leading orphaned tool-result user turns; a tool-result turn is only valid immediately
+  // after its matching assistant `toolUses` turn, which cannot be the first turn.
+  while (repaired.length > 0 && repaired[0]?.userInputMessage?.userInputMessageContext?.toolResults) {
+    repaired = repaired.slice(1);
+  }
+
+  // If history now begins with an assistant turn, give it a valid user head instead of dropping
+  // it — the surviving assistant may own the current turn's tool results.
+  if (repaired.length > 0 && repaired[0]?.assistantResponseMessage) {
+    repaired = [
+      { userInputMessage: { content: KIRO_RUNNING_TOOLS_MESSAGE, modelId, origin: KIRO_REQUEST_ORIGIN } },
+      ...repaired,
+    ];
+  }
+
+  // The current turn is always a user turn, so history must not end on a user turn. Insert a
+  // synthetic "Continue" assistant turn to preserve alternation (mirrors appendHistoryMessage).
+  if (repaired.length > 0 && repaired[repaired.length - 1]?.userInputMessage) {
+    repaired = [...repaired, { assistantResponseMessage: { content: KIRO_CONTINUATION_MESSAGE } }];
+  }
+
+  return repaired;
+}
+
 function fitKiroPayloadToSize(input: {
   history: readonly KiroConversationMessage[];
   currentMessage: KiroUserInputMessage;
+  originalMessages: readonly Message[];
+  serviceModelId: string;
   conversationId?: string;
   profileArn?: string;
   historyByteBudget: number;
@@ -1096,15 +1144,18 @@ function fitKiroPayloadToSize(input: {
   let aggregateToolResultTruncationCount = 0;
   let removedOptionalToolDefinitionCount = 0;
 
-  const buildPayload = (): KiroRequestPayload => ({
-    conversationState: {
-      chatTriggerType: KIRO_CHAT_TRIGGER_TYPE,
-      conversationId: input.conversationId,
-      history: history.length > 0 ? history : undefined,
-      currentMessage: { userInputMessage: currentMessage },
-    },
-    profileArn: input.profileArn,
-  });
+  const buildPayload = (): KiroRequestPayload => {
+    const wireHistory = repairKiroWireHistory(history, currentMessage.modelId);
+    return {
+      conversationState: {
+        chatTriggerType: KIRO_CHAT_TRIGGER_TYPE,
+        conversationId: input.conversationId,
+        history: wireHistory.length > 0 ? wireHistory : undefined,
+        currentMessage: { userInputMessage: currentMessage },
+      },
+      profileArn: input.profileArn,
+    };
+  };
 
   let payload = buildPayload();
   let serialized = serializeKiroPayload(payload);
@@ -1136,6 +1187,22 @@ function fitKiroPayloadToSize(input: {
     payload = buildPayload();
     serialized = serializeKiroPayload(payload);
   }
+
+  // Pruning drops history from the front and can strip away the assistant `toolUses` turn that
+  // owns the current turn's tool results (sanitizeKiroHistory discards a headless protected
+  // assistant). Re-run alignment against the original messages so those owners are always
+  // restored; otherwise the current tool-result turn is orphaned and Kiro returns
+  // REQUEST_BODY_INVALID.
+  const realigned = alignCurrentToolResultsWithHistory({
+    history,
+    currentMessage,
+    originalMessages: input.originalMessages,
+    serviceModelId: input.serviceModelId,
+  });
+  history = realigned.history;
+  currentMessage = realigned.currentMessage;
+  payload = buildPayload();
+  serialized = serializeKiroPayload(payload);
 
   const diagnostics = {
     prunedHistoryMessageCount: Math.max(0, input.history.length - history.length),
@@ -1242,6 +1309,8 @@ export function adaptPiContextToKiroRequest(input: KiroRequestAdapterInput): Kir
   const fitted = fitKiroPayloadToSize({
     history: injected.history,
     currentMessage: currentWithHistoryTools,
+    originalMessages: normalizedMessages,
+    serviceModelId,
     conversationId: input.conversationId,
     profileArn: input.credentials.profileArn,
     historyByteBudget,
