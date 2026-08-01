@@ -24,7 +24,11 @@ import {
   buildKiroHttpErrorMessage,
   buildKiroTransportRequest,
 } from "./request";
-import { createKiroResponseStreamDecoder, createKiroStreamEventAdapter } from "./stream";
+import {
+  createKiroResponseStreamDecoder,
+  createKiroStreamEventAdapter,
+  summarizeKiroStreamEvent,
+} from "./stream";
 import {
   KIRO_CONFIG_FILE_NAME,
   KIRO_CUSTOM_API,
@@ -176,6 +180,11 @@ function headersToRecord(headers: Headers): Record<string, string> {
   return Object.fromEntries(headers.entries());
 }
 
+function isStreamDiagnosticsEnabled(dependencies: KiroExtensionDependencies): boolean {
+  const value = dependencies.env?.KIRO_DEBUG_STREAM_EVENTS ?? process.env.KIRO_DEBUG_STREAM_EVENTS;
+  return value === "1" || value?.toLowerCase() === "true";
+}
+
 async function resolveKiroStreamCredentials(
   dependencies: KiroExtensionDependencies,
   options?: SimpleStreamOptions,
@@ -236,6 +245,7 @@ export function createKiroStreamSimple(dependencies: KiroExtensionDependencies =
       let conversationId: string | undefined;
       let finalPayloadUtf8Bytes: number | undefined;
       let finalPayloadMeasuredAfterCallback = false;
+      const debugStreamEvents = isStreamDiagnosticsEnabled(dependencies);
 
       try {
         for (const event of adapter.start()) {
@@ -344,6 +354,13 @@ export function createKiroStreamSimple(dependencies: KiroExtensionDependencies =
             }
 
             for (const rawEvent of responseDecoder.push(value)) {
+              if (debugStreamEvents) {
+                await logKiroInfo(dependencies, "stream_event_shape", "Decoded Kiro stream event.", {
+                  modelId: model.id,
+                  conversationId,
+                  ...summarizeKiroStreamEvent(rawEvent),
+                });
+              }
               for (const event of adapter.pushRawEvent(rawEvent)) {
                 stream.push(event);
               }
@@ -351,6 +368,13 @@ export function createKiroStreamSimple(dependencies: KiroExtensionDependencies =
           }
 
           for (const rawEvent of responseDecoder.finish()) {
+            if (debugStreamEvents) {
+              await logKiroInfo(dependencies, "stream_event_shape", "Decoded Kiro stream event.", {
+                modelId: model.id,
+                conversationId,
+                ...summarizeKiroStreamEvent(rawEvent),
+              });
+            }
             for (const event of adapter.pushRawEvent(rawEvent)) {
               stream.push(event);
             }

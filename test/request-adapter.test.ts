@@ -6,7 +6,7 @@ import {
   adaptPiContextToKiroRequest,
   buildKiroRequestEndpoint,
   buildKiroTransportRequest,
-  getKiroHistoryCharacterBudget,
+  getKiroHistoryByteBudget,
   KIRO_MAX_CURRENT_TOOL_RESULT_TEXT_CHARS,
   KIRO_MAX_REQUEST_BODY_BYTES,
   convertPiToolDefinitions,
@@ -292,6 +292,70 @@ describe("kiro request adapter", () => {
     expect(prepared.payload.conversationState.currentMessage.userInputMessage.content).toBe("latest question");
   });
 
+  it("prunes history using UTF-8 bytes for non-ASCII content", () => {
+    const messages: Message[] = [];
+    for (let index = 0; index < 8; index += 1) {
+      messages.push(
+        { role: "user", content: `用户-${index}-${"😀".repeat(20_000)}`, timestamp: index * 2 + 1 },
+        {
+          role: "assistant",
+          content: [{ type: "text", text: `助手-${index}-${"😀".repeat(20_000)}` }],
+          api: "kiro-api",
+          provider: "kiro",
+          model: "claude-sonnet-4",
+          usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+          stopReason: "stop",
+          timestamp: index * 2 + 2,
+        },
+      );
+    }
+    messages.push({ role: "user", content: "最新の質問", timestamp: 100 });
+
+    const prepared = adaptPiContextToKiroRequest({
+      modelId: "claude-sonnet-4",
+      credentials,
+      context: { messages },
+    });
+    const history = prepared.payload.conversationState.history ?? [];
+
+    expect(prepared.diagnostics?.prunedHistoryMessageCount).toBeGreaterThan(0);
+    expect(history[0]?.userInputMessage).toBeDefined();
+    expect(prepared.diagnostics?.finalPayloadUtf8Bytes).toBeLessThanOrEqual(KIRO_MAX_REQUEST_BODY_BYTES);
+  });
+
+  it("removes leading assistant history and preserves a valid user-first history", () => {
+    const messages: Message[] = [
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "orphaned assistant response" }],
+        api: "kiro-api",
+        provider: "kiro",
+        model: "claude-sonnet-4",
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+        stopReason: "stop",
+        timestamp: 1,
+      },
+      { role: "user", content: "actual first turn", timestamp: 2 },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "valid response" }],
+        api: "kiro-api",
+        provider: "kiro",
+        model: "claude-sonnet-4",
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+        stopReason: "stop",
+        timestamp: 3,
+      },
+      { role: "user", content: "current turn", timestamp: 4 },
+    ];
+
+    const prepared = adaptPiContextToKiroRequest({ modelId: "claude-sonnet-4", credentials, context: { messages } });
+    const history = prepared.payload.conversationState.history ?? [];
+
+    expect(history[0]?.userInputMessage?.content).toBe("actual first turn");
+    expect(history.every((entry) => entry.userInputMessage || entry.assistantResponseMessage)).toBe(true);
+  });
+
   it("serializes the final payload as UTF-8 bytes rather than JavaScript code units", () => {
     const prepared = adaptPiContextToKiroRequest({
       modelId: "claude-sonnet-4",
@@ -457,9 +521,9 @@ describe("kiro request adapter", () => {
   });
 
   it("scales history allocation from model context without changing the body guardrail", () => {
-    expect(getKiroHistoryCharacterBudget()).toBe(500_000);
-    expect(getKiroHistoryCharacterBudget(200_000)).toBe(850_000);
-    expect(getKiroHistoryCharacterBudget(400_000)).toBe(1_700_000);
+    expect(getKiroHistoryByteBudget()).toBe(500_000);
+    expect(getKiroHistoryByteBudget(200_000)).toBe(850_000);
+    expect(getKiroHistoryByteBudget(400_000)).toBe(1_700_000);
 
     const prepared = adaptPiContextToKiroRequest({
       modelId: "claude-sonnet-4",
@@ -467,6 +531,6 @@ describe("kiro request adapter", () => {
       contextWindow: 400_000,
       context: { messages: [{ role: "user", content: "hello", timestamp: 1 }] },
     });
-    expect(prepared.diagnostics).toMatchObject({ historyCharacterBudget: 1_700_000, maxRequestBodyBytes: KIRO_MAX_REQUEST_BODY_BYTES });
+    expect(prepared.diagnostics).toMatchObject({ historyByteBudget: 1_700_000, maxRequestBodyBytes: KIRO_MAX_REQUEST_BODY_BYTES });
   });
 });

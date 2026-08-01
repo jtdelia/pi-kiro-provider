@@ -181,7 +181,7 @@ export interface KiroRequestDiagnostics {
   finalPayloadUtf8Bytes: number;
   maxRequestBodyBytes: number;
   requestFitsBudget: boolean;
-  historyCharacterBudget: number;
+  historyByteBudget: number;
   payloadModifiedByCallback?: boolean;
 }
 
