@@ -51,7 +51,7 @@ const KIRO_TRUNCATION_TOKEN = "... [TRUNCATED] ...";
 const KIRO_TRUNCATION_MARKER = `\n${KIRO_TRUNCATION_TOKEN}\n`;
 const KIRO_MAX_TOOL_RESULT_TEXT_CHARS = 100_000;
 export const KIRO_MAX_CURRENT_TOOL_RESULT_TEXT_CHARS = 200_000;
-const KIRO_DEFAULT_HISTORY_CHARACTER_BUDGET = 500_000;
+const KIRO_DEFAULT_HISTORY_BYTE_BUDGET = 500_000;
 /** Conservative client guardrail, not a documented Kiro service limit. */
 export const KIRO_MAX_REQUEST_BODY_BYTES = 650_000;
 
@@ -71,9 +71,9 @@ export function serializeKiroPayload(payload: KiroRequestPayload): KiroSerialize
   };
 }
 
-export function getKiroHistoryCharacterBudget(contextWindow?: number): number {
+export function getKiroHistoryByteBudget(contextWindow?: number): number {
   if (typeof contextWindow !== "number" || !Number.isFinite(contextWindow) || contextWindow <= 0) {
-    return KIRO_DEFAULT_HISTORY_CHARACTER_BUDGET;
+    return KIRO_DEFAULT_HISTORY_BYTE_BUDGET;
   }
 
   return Math.floor((contextWindow / 200_000) * 850_000);
@@ -674,7 +674,8 @@ function sanitizeKiroHistory(history: readonly KiroConversationMessage[]): KiroC
     sanitized.push(message);
   }
 
-  return sanitized;
+  const firstUserIndex = sanitized.findIndex((entry) => Boolean(entry.userInputMessage));
+  return firstUserIndex === -1 ? [] : sanitized.slice(firstUserIndex);
 }
 
 function cloneKiroUserInputMessage(message: KiroUserInputMessage): KiroUserInputMessage {
@@ -739,13 +740,13 @@ function findProtectedHistoryStart(
   return protectedStart;
 }
 
-function pruneKiroHistoryToCharacterBudget(
+function pruneKiroHistoryToByteBudget(
   history: readonly KiroConversationMessage[],
-  maxCharacters: number,
+  maxBytes: number,
   protectedToolUseIds: ReadonlySet<string>,
 ): KiroConversationMessage[] {
   let pruned = sanitizeKiroHistory(history);
-  while (JSON.stringify(pruned).length > maxCharacters && pruned.length > 0) {
+  while (Buffer.byteLength(JSON.stringify(pruned), "utf8") > maxBytes && pruned.length > 0) {
     const reduced = dropOldestKiroHistoryExchange(pruned, protectedToolUseIds);
     if (reduced.length === pruned.length) {
       break;
@@ -1073,7 +1074,7 @@ function fitKiroPayloadToSize(input: {
   currentMessage: KiroUserInputMessage;
   conversationId?: string;
   profileArn?: string;
-  historyCharacterBudget: number;
+  historyByteBudget: number;
 }): {
   payload: KiroRequestPayload;
   serialized: KiroSerializedPayload;
@@ -1087,9 +1088,9 @@ function fitKiroPayloadToSize(input: {
   const strippedHistory = stripHistoricalImages(input.history);
   let currentMessage = applyPerResultToolResultBudget(input.currentMessage);
   const protectedToolUseIds = getCurrentToolResultIds(currentMessage);
-  let history = pruneKiroHistoryToCharacterBudget(
+  let history = pruneKiroHistoryToByteBudget(
     strippedHistory.history,
-    input.historyCharacterBudget,
+    input.historyByteBudget,
     protectedToolUseIds,
   );
   let aggregateToolResultTruncationCount = 0;
@@ -1237,13 +1238,13 @@ export function adaptPiContextToKiroRequest(input: KiroRequestAdapterInput): Kir
     effectiveSystemPrompt || undefined,
   );
   const currentWithHistoryTools = ensureHistoryToolDefinitions(injected.history, injected.currentMessage);
-  const historyCharacterBudget = getKiroHistoryCharacterBudget(input.contextWindow);
+  const historyByteBudget = getKiroHistoryByteBudget(input.contextWindow);
   const fitted = fitKiroPayloadToSize({
     history: injected.history,
     currentMessage: currentWithHistoryTools,
     conversationId: input.conversationId,
     profileArn: input.credentials.profileArn,
-    historyCharacterBudget,
+    historyByteBudget,
   });
   const endpoint = buildKiroRequestEndpoint(input.credentials);
   const region = resolveKiroRequestRegion(input.credentials);
@@ -1271,7 +1272,7 @@ export function adaptPiContextToKiroRequest(input: KiroRequestAdapterInput): Kir
       finalPayloadUtf8Bytes: fitted.serialized.utf8Bytes,
       maxRequestBodyBytes: KIRO_MAX_REQUEST_BODY_BYTES,
       requestFitsBudget: true,
-      historyCharacterBudget,
+      historyByteBudget,
     },
   };
 }
