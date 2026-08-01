@@ -234,6 +234,10 @@ export function mapThinkingLevelToKiroThinkingConfig(reasoning?: ThinkingLevel):
   }
 
   const budgetTokens = KIRO_THINKING_BUDGETS[reasoning];
+  if (budgetTokens === undefined) {
+    throw new Error(`Unsupported Kiro thinking level: ${reasoning}`);
+  }
+
   return {
     enabled: true,
     level: reasoning,

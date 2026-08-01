@@ -7,6 +7,7 @@ import type {
   KiroModelCost,
   KiroNormalizedModelDefinition,
   KiroProviderModelConfig,
+  KiroThinkingLevelMap,
 } from "./types";
 
 const KIRO_ZERO_COST: Readonly<KiroModelCost> = Object.freeze({
@@ -35,6 +36,7 @@ export interface KiroDiscoveredModelRecord {
   family?: string;
   reasoning?: boolean;
   supportsReasoning?: boolean;
+  thinkingLevelMap?: Partial<Record<"minimal" | "low" | "medium" | "high" | "xhigh", string>>;
   reasoningSupported?: boolean;
   supportsPromptCache?: boolean;
   inputModalities?: readonly KiroInputModality[];
@@ -129,6 +131,23 @@ export function deriveReasoningCapability(model: KiroCatalogModelDefinition): bo
   );
 }
 
+export function deriveThinkingLevelMap(
+  model: KiroCatalogModelDefinition,
+  reasoning = deriveReasoningCapability(model),
+): KiroThinkingLevelMap | undefined {
+  if (!reasoning) {
+    return undefined;
+  }
+
+  if (model.thinkingLevelMap && Object.keys(model.thinkingLevelMap).length > 0) {
+    return { ...model.thinkingLevelMap };
+  }
+
+  // Kiro's adapter supports the existing 32,768-token xhigh budget.
+  // Do not advertise max until Kiro documents a corresponding budget.
+  return { xhigh: "xhigh" };
+}
+
 export function deriveInputModalities(model: KiroCatalogModelDefinition): KiroInputModality[] {
   if (model.inputModalities && model.inputModalities.length > 0) {
     return [...model.inputModalities];
@@ -185,6 +204,7 @@ export function normalizeKiroCatalogModel(
     family: model.family,
     notes: model.notes,
     reasoning: deriveReasoningCapability(model),
+    thinkingLevelMap: deriveThinkingLevelMap(model),
     input: deriveInputModalities(model),
     cost: cloneZeroCost(),
     contextWindow: deriveContextWindow(model),
@@ -197,6 +217,7 @@ export function toKiroProviderModelConfig(model: KiroNormalizedModelDefinition):
     id: model.id,
     name: model.name,
     reasoning: model.reasoning,
+    ...(model.thinkingLevelMap ? { thinkingLevelMap: { ...model.thinkingLevelMap } } : {}),
     input: [...model.input],
     cost: { ...model.cost },
     contextWindow: model.contextWindow,
@@ -248,6 +269,7 @@ export function normalizeDiscoveredKiroModel(record: KiroDiscoveredModelRecord):
     serviceModelId: record.serviceModelId ?? record.modelId ?? id,
     family: record.family ?? deriveModelFamily(id),
     reasoning: record.reasoning ?? record.supportsReasoning ?? record.reasoningSupported,
+    thinkingLevelMap: record.thinkingLevelMap,
     inputModalities,
     contextWindow: record.contextWindow
       ?? record.context_window
@@ -302,6 +324,15 @@ function extractSingleModelRecord(item: Record<string, unknown>): KiroDiscovered
     family: readString(item.family),
     reasoning: readBoolean(item.reasoning),
     supportsReasoning: readBoolean(item.supportsReasoning),
+    thinkingLevelMap: isRecord(item.thinkingLevelMap)
+      ? {
+          minimal: readString(item.thinkingLevelMap.minimal),
+          low: readString(item.thinkingLevelMap.low),
+          medium: readString(item.thinkingLevelMap.medium),
+          high: readString(item.thinkingLevelMap.high),
+          xhigh: readString(item.thinkingLevelMap.xhigh),
+        }
+      : undefined,
     reasoningSupported: readBoolean(item.reasoningSupported),
     supportsPromptCache: readBoolean(item.supportsPromptCache),
     inputModalities: readInputModalities(item.inputModalities)
@@ -414,6 +445,7 @@ export function mergeKiroProviderModels(
   for (const model of fallbackModels) {
     merged.set(model.id, {
       ...model,
+      ...(model.thinkingLevelMap ? { thinkingLevelMap: { ...model.thinkingLevelMap } } : {}),
       input: [...model.input],
       cost: { ...model.cost },
     });
@@ -422,6 +454,7 @@ export function mergeKiroProviderModels(
   for (const model of discoveredModels) {
     merged.set(model.id, {
       ...model,
+      ...(model.thinkingLevelMap ? { thinkingLevelMap: { ...model.thinkingLevelMap } } : {}),
       input: [...model.input],
       cost: { ...model.cost },
     });

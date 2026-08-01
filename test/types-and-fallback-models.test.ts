@@ -68,6 +68,15 @@ describe("kiro shared types and fallback models", () => {
     expect(KIRO_FALLBACK_MODELS.some((model) => model.reasoning)).toBe(true);
   });
 
+  it("exposes xhigh for reasoning models but not max or non-reasoning models", () => {
+    const reasoningModel = KIRO_FALLBACK_PROVIDER_MODELS.find((model) => model.reasoning);
+    const nonReasoningModel = KIRO_FALLBACK_PROVIDER_MODELS.find((model) => !model.reasoning);
+
+    expect(reasoningModel?.thinkingLevelMap).toEqual({ xhigh: "xhigh" });
+    expect(Object.prototype.hasOwnProperty.call(reasoningModel?.thinkingLevelMap, "max")).toBe(false);
+    expect(nonReasoningModel?.thinkingLevelMap).toBeUndefined();
+  });
+
   it("returns provider-model-shaped entries for the full fallback list", () => {
     for (const model of KIRO_FALLBACK_MODELS) {
       const providerModel = toKiroProviderModelConfig(model);
@@ -79,6 +88,9 @@ describe("kiro shared types and fallback models", () => {
       expect(providerModel.input.every((input) => input === "text" || input === "image")).toBe(true);
       expect(providerModel.contextWindow).toBeGreaterThan(0);
       expect(providerModel.maxTokens).toBeGreaterThan(0);
+      expect(providerModel.thinkingLevelMap).toEqual(
+        providerModel.reasoning ? { xhigh: "xhigh" } : undefined,
+      );
       expect(providerModel.cost).toEqual({
         input: 0,
         output: 0,

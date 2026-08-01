@@ -163,6 +163,14 @@ describe("kiro request adapter", () => {
         "<thinking_mode>enabled</thinking_mode><max_thinking_length>16384</max_thinking_length>",
     });
 
+    expect(mapThinkingLevelToKiroThinkingConfig("xhigh")).toEqual({
+      enabled: true,
+      level: "xhigh",
+      budgetTokens: 32768,
+      systemPromptPrefix:
+        "<thinking_mode>enabled</thinking_mode><max_thinking_length>32768</max_thinking_length>",
+    });
+
     const prepared = adaptPiContextToKiroRequest({
       modelId: "claude-sonnet-4",
       credentials,
