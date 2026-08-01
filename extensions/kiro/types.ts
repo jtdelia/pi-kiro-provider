@@ -45,12 +45,15 @@ export interface KiroModelCost {
   cacheWrite: number;
 }
 
+export type KiroThinkingLevelMap = Partial<Record<ThinkingLevel, string>>;
+
 export interface KiroCatalogModelDefinition {
   id: string;
   name: string;
   serviceModelId?: string;
   family?: string;
   reasoning?: boolean;
+  thinkingLevelMap?: KiroThinkingLevelMap;
   inputModalities?: readonly KiroInputModality[];
   contextWindow?: number;
   maxTokens?: number;
@@ -61,6 +64,7 @@ export interface KiroProviderModelConfig {
   id: string;
   name: string;
   reasoning: boolean;
+  thinkingLevelMap?: KiroThinkingLevelMap;
   input: KiroInputModality[];
   cost: KiroModelCost;
   contextWindow: number;

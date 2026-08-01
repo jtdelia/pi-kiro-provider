@@ -19,6 +19,7 @@ It adds a `kiro` provider to pi, integrates with `/login`, supports AWS Builder 
 - Streams text responses through a custom pi provider adapter
 - Supports tool calls
 - Supports manual `profileArn` configuration for enterprise IAM Identity Center setups
+- Exposes `xhigh` thinking for reasoning-capable Kiro models
 
 ## Install
 
@@ -33,6 +34,10 @@ You can also try it for one session without installing it permanently:
 ```bash
 pi -e git:github.com/jtdelia/pi-kiro-provider
 ```
+
+## Compatibility
+
+This extension targets the latest pi release. Its model-level `thinkingLevelMap` support requires pi 0.72 or newer; current pi releases support the `xhigh` capability advertised by this provider. The extension intentionally does not advertise `max` because Kiro's corresponding budget and semantics are not confirmed.
 
 ## Quick start
 
@@ -122,7 +127,7 @@ That means:
 - provider registration still works when discovery fails
 - the extension remains usable when the live catalog is unavailable
 
-The bundled catalog currently includes validated fallback entries across several model families, including Claude, MiniMax, GLM, and Qwen.
+The bundled catalog currently includes validated fallback entries across several model families, including Claude, MiniMax, GLM, and Qwen. Reasoning-capable models expose the `xhigh` level, which maps to Kiro's existing 32,768-token thinking budget. `max` is not advertised because the Kiro-side budget and semantics have not been confirmed.
 
 ## Troubleshooting
 
