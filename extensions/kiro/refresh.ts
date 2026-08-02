@@ -191,16 +191,28 @@ function buildRefreshHeaders(): Record<string, string> {
   };
 }
 
-export function buildBuilderIdRefreshRequest(credentials: Pick<KiroOAuthCredentials, "region" | "refresh">): KiroRefreshRequest {
-  const region = normalizeStoredRegion(credentials.region);
+export function buildBuilderIdRefreshRequest(
+  credentials: Pick<KiroOAuthCredentials, "oidcRegion" | "region" | "refresh" | "clientId" | "clientSecret">,
+): KiroRefreshRequest {
+  const clientId = credentials.clientId?.trim();
+  const clientSecret = credentials.clientSecret?.trim();
+
+  if (!clientId || !clientSecret) {
+    throw new Error("Builder ID refresh requires stored clientId and clientSecret. Run /login again.");
+  }
+
+  const oidcRegion = normalizeStoredRegion(credentials.oidcRegion ?? credentials.region);
 
   return {
-    url: `https://prod.${region}.auth.desktop.kiro.dev/refreshToken`,
+    url: `https://oidc.${oidcRegion}.amazonaws.com/token`,
     init: {
       method: "POST",
       headers: buildRefreshHeaders(),
       body: JSON.stringify({
+        clientId,
+        clientSecret,
         refreshToken: requireNonEmptyString(credentials.refresh, "Refresh token"),
+        grantType: KIRO_REFRESH_GRANT_TYPE,
       }),
     },
   };

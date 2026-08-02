@@ -34,13 +34,13 @@ function createFetchMock(responses: Array<Response | Error>) {
 }
 
 describe("kiro token refresh", () => {
-  it("routes Builder ID refresh through the desktop endpoint and preserves metadata", async () => {
+  it("routes Builder ID refresh through the AWS OIDC endpoint and preserves metadata", async () => {
     const now = 1_700_000_000_000;
     const fetchMock = createFetchMock([
       jsonResponse({
-        accessToken: "builder-access-next",
-        refreshToken: "builder-refresh-next",
-        expiresIn: 3600,
+        access_token: "builder-access-next",
+        refresh_token: "builder-refresh-next",
+        expires_in: 3600,
       }),
     ]);
     const refreshToken = createKiroRefreshToken({
@@ -62,10 +62,13 @@ describe("kiro token refresh", () => {
     const refreshed = await refreshToken(credentials);
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock.mock.calls[0]?.[0]).toBe("https://prod.eu-west-1.auth.desktop.kiro.dev/refreshToken");
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("https://oidc.us-east-1.amazonaws.com/token");
     expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({ method: "POST" });
     expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({
+      clientId: "builder-client-id",
+      clientSecret: "builder-client-secret",
       refreshToken: "builder-refresh-current",
+      grantType: "refresh_token",
     });
 
     expect(refreshed).toEqual({
