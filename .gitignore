@@ -2,3 +2,10 @@ node_modules/
 .DS_Store
 coverage/
 *.log
+
+# Local agent scratch state
+.pi/
+.pi-subagents/
+
+# Captured Kiro API traffic; contains account identifiers and prompt content
+test-kiro-cli-*.jsonl

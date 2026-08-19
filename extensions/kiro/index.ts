@@ -16,13 +16,14 @@ import {
 
 import { createKiroOAuthProviderConfig, type KiroLoginDependencies } from "./auth";
 import { logKiroError, logKiroInfo } from "./logging";
-import { discoverAndMergeKiroProviderModels, getKiroInitialProviderModels } from "./models";
+import { discoverAndMergeKiroProviderModels, discoverKiroProfileArn, getKiroInitialProviderModels } from "./models";
 import {
   KIRO_MAX_REQUEST_BODY_BYTES,
   KiroContextLengthExceededError,
   adaptPiContextToKiroRequest,
   buildKiroHttpErrorMessage,
   buildKiroTransportRequest,
+  kiroContextRequiresCliMode,
 } from "./request";
 import {
   createKiroResponseStreamDecoder,
@@ -185,9 +186,58 @@ function isStreamDiagnosticsEnabled(dependencies: KiroExtensionDependencies): bo
   return value === "1" || value?.toLowerCase() === "true";
 }
 
+/**
+ * Cache of discovered profile ARNs, keyed by access token. Discovery costs an extra round trip
+ * and the answer is stable for the life of a token, so it is resolved at most once per token.
+ */
+const kiroProfileArnCache = new Map<string, string | undefined>();
+
+/** Exposed for tests; discovery is otherwise cached for the process lifetime. */
+export function clearKiroProfileArnCache(): void {
+  kiroProfileArnCache.clear();
+}
+
+/**
+ * Resolve the profile ARN for a request, preferring explicit configuration and falling back to
+ * asking Kiro. CLI-mode requests (any turn carrying an image) fail with
+ * `profileArn is required for this request.` when this is missing, and Identity Center logins do
+ * not include a profile ARN with their tokens. Discovery failures are logged and swallowed so the
+ * caller still surfaces the actionable "set KIRO_PROFILE_ARN" guidance.
+ */
+async function resolveKiroProfileArn(
+  dependencies: KiroExtensionDependencies,
+  credentials: { access: string; region: string; profileArn?: string },
+): Promise<string | undefined> {
+  if (credentials.profileArn) {
+    return credentials.profileArn;
+  }
+
+  const cached = kiroProfileArnCache.get(credentials.access);
+  if (cached !== undefined || kiroProfileArnCache.has(credentials.access)) {
+    return cached;
+  }
+
+  try {
+    const discovered = await discoverKiroProfileArn(credentials, dependencies);
+    kiroProfileArnCache.set(credentials.access, discovered);
+    if (discovered) {
+      await logKiroInfo(dependencies, "profile_arn_discovered", "Discovered Kiro profileArn.", {
+        region: credentials.region,
+      });
+    }
+    return discovered;
+  } catch (error) {
+    kiroProfileArnCache.set(credentials.access, undefined);
+    await logKiroError(dependencies, "profile_arn_discovery_error", error, { region: credentials.region });
+    return undefined;
+  }
+}
+
 async function resolveKiroStreamCredentials(
   dependencies: KiroExtensionDependencies,
   options?: SimpleStreamOptions,
+  /** Profile discovery is only worth a round trip for CLI-mode (image) requests. */
+  needsProfileArn = false,
 ): Promise<Pick<KiroOAuthCredentials, "access" | "region" | "profileArn"> & {
   authMode?: KiroOAuthCredentials["authMode"];
   configPath?: string;
@@ -199,11 +249,18 @@ async function resolveKiroStreamCredentials(
   });
 
   if (storedCredentials) {
+    const access = options?.apiKey ?? storedCredentials.access;
     return {
-      access: options?.apiKey ?? storedCredentials.access,
+      access,
       authMode: storedCredentials.authMode,
       region: storedCredentials.region,
-      profileArn: storedCredentials.profileArn,
+      profileArn: needsProfileArn
+        ? await resolveKiroProfileArn(dependencies, {
+            access,
+            region: storedCredentials.region,
+            profileArn: storedCredentials.profileArn,
+          })
+        : storedCredentials.profileArn,
       configPath: runtimeConfig.configPath,
     };
   }
@@ -213,7 +270,13 @@ async function resolveKiroStreamCredentials(
       access: options.apiKey,
       authMode: undefined,
       region: KIRO_DEFAULT_SERVICE_REGION,
-      profileArn: runtimeConfig.profileArn,
+      profileArn: needsProfileArn
+        ? await resolveKiroProfileArn(dependencies, {
+            access: options.apiKey,
+            region: KIRO_DEFAULT_SERVICE_REGION,
+            profileArn: runtimeConfig.profileArn,
+          })
+        : runtimeConfig.profileArn,
       configPath: runtimeConfig.configPath,
     };
   }
@@ -252,7 +315,11 @@ export function createKiroStreamSimple(dependencies: KiroExtensionDependencies =
           stream.push(event);
         }
 
-        const credentials = await resolveKiroStreamCredentials(dependencies, options);
+        const credentials = await resolveKiroStreamCredentials(
+          dependencies,
+          options,
+          kiroContextRequiresCliMode(context as never),
+        );
         conversationId = options?.sessionId ?? randomUUID();
         const preparedRequest = adaptPiContextToKiroRequest({
           modelId: model.id,

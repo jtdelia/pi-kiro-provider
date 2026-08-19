@@ -24,6 +24,7 @@ type KiroUsagePayload = {
 type KiroNormalizedStreamEvent =
   | { type: "content"; text: string }
   | { type: "tool_use"; toolUseId: string; name?: string; inputText?: string; inputValue?: Record<string, unknown>; stop: boolean }
+  | { type: "reasoning_content"; redactedContent: string }
   | { type: "stop"; stopReason?: string; usage?: KiroUsagePayload }
   | { type: "done" }
   | { type: "error"; message: string }
@@ -451,6 +452,14 @@ function flushBufferedContent(
   }
 }
 
+function normalizeReasoningContentEvent(event: unknown): KiroNormalizedStreamEvent | undefined {
+  if (!isRecord(event) || typeof event.redactedContent !== "string") {
+    return undefined;
+  }
+
+  return { type: "reasoning_content", redactedContent: event.redactedContent };
+}
+
 function normalizeToolUseEvent(event: Record<string, unknown>): KiroNormalizedStreamEvent | undefined {
   const toolUseId = readString(event.toolUseId) ?? readString(event.id);
   if (!toolUseId) {
@@ -514,6 +523,8 @@ function normalizeKiroEvent(event: unknown): KiroNormalizedStreamEvent | undefin
         break;
       case "toolUseEvent":
         return normalizeToolUseEvent(event);
+      case "reasoningContentEvent":
+        return normalizeReasoningContentEvent(event);
       case "metadataEvent":
       case "messageMetadataEvent":
       case "contextUsageEvent":
@@ -554,6 +565,14 @@ function normalizeKiroEvent(event: unknown): KiroNormalizedStreamEvent | undefin
 
   if (isRecord(event.toolUseEvent)) {
     return normalizeToolUseEvent(event.toolUseEvent);
+  }
+
+  if (isRecord(event.reasoningContentEvent)) {
+    return normalizeReasoningContentEvent(event.reasoningContentEvent);
+  }
+
+  if (typeof event.redactedContent === "string") {
+    return normalizeReasoningContentEvent(event);
   }
 
   if (eventUsage) {
@@ -797,6 +816,29 @@ function finalizePendingToolCalls(state: KiroStreamAdapterState, events: Assista
   }
 }
 
+function applyReasoningContentEvent(
+  state: KiroStreamAdapterState,
+  events: AssistantMessageEvent[],
+  event: Extract<KiroNormalizedStreamEvent, { type: "reasoning_content" }>,
+): void {
+  const existingThinking = [...state.output.content].reverse().find(
+    (part): part is Extract<AssistantMessage["content"][number], { type: "thinking" }> => part.type === "thinking",
+  );
+
+  if (existingThinking) {
+    existingThinking.thinkingSignature = event.redactedContent;
+    existingThinking.redacted = true;
+    return;
+  }
+
+  state.output.content.push({
+    type: "thinking",
+    thinking: "",
+    thinkingSignature: event.redactedContent,
+    redacted: true,
+  });
+}
+
 function applyToolUseEvent(
   state: KiroStreamAdapterState,
   events: AssistantMessageEvent[],
@@ -872,6 +914,11 @@ export function createKiroStreamEventAdapter(input: {
       if (event.type === "tool_use") {
         flushBufferedContent(state, events, true);
         applyToolUseEvent(state, events, event);
+        return events;
+      }
+
+      if (event.type === "reasoning_content") {
+        applyReasoningContentEvent(state, events, event);
         return events;
       }
 
@@ -994,6 +1041,8 @@ function parseKiroEventStreamMessage(message: {
       return isRecord(parsedBody) ? { assistantResponseEvent: parsedBody } : undefined;
     case "toolUseEvent":
       return isRecord(parsedBody) ? { toolUseEvent: parsedBody } : undefined;
+    case "reasoningContentEvent":
+      return isRecord(parsedBody) ? { reasoningContentEvent: parsedBody } : undefined;
     case "messageDeltaEvent":
       return isRecord(parsedBody) ? { messageDeltaEvent: parsedBody } : undefined;
     case "contextUsageEvent":

@@ -1,7 +1,7 @@
 import { EventStreamCodec } from "@smithy/eventstream-codec";
 import { describe, expect, it, vi } from "vitest";
 
-import { createKiroProviderConfig } from "../extensions/kiro/index";
+import { clearKiroProfileArnCache, createKiroProviderConfig } from "../extensions/kiro/index";
 import { KIRO_MAX_REQUEST_BODY_BYTES, serializeKiroPayload } from "../extensions/kiro/request";
 import type { KiroRequestPayload } from "../extensions/kiro/types";
 import { KIRO_CUSTOM_API, KIRO_PROVIDER_NAME } from "../extensions/kiro/types";
@@ -166,6 +166,111 @@ describe("kiro streamSimple transport", () => {
       totalTokens: 16,
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("discovers a profileArn for image requests and reuses it across turns", async () => {
+    // CLI mode is required for image turns and the runtime rejects a body without profileArn.
+    const profileArn = "arn:aws:codewhisperer:us-west-2:111122223333:profile/ABC";
+    const requests: Array<{ url: string; body: string }> = [];
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      requests.push({ url, body: String(init?.body) });
+
+      if (url.startsWith("https://management.")) {
+        return new Response(JSON.stringify({ profiles: [{ arn: profileArn }] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+
+      return createEventStreamResponse([
+        createEventStreamMessage("assistantResponseEvent", { content: "a cat", modelId: "claude-sonnet-4" }),
+        createEventStreamMessage("messageDeltaEvent", { delta: { stop_reason: "end_turn" } }),
+      ]);
+    });
+
+    const provider = createKiroProviderConfig({
+      fetch: fetchMock as unknown as typeof fetch,
+      readAuthFile: async () =>
+        JSON.stringify({
+          kiro: {
+            type: "oauth",
+            access: "stored-access-token",
+            refresh: "refresh-token",
+            expires: Date.now() + 60_000,
+            authMode: "identity-center",
+            region: "us-west-2",
+            oidcRegion: "us-west-2",
+            clientId: "client-id",
+            clientSecret: "client-secret",
+          },
+        }),
+    });
+
+    clearKiroProfileArnCache();
+
+    const imageContext = {
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "what is in this image" },
+            { type: "image", data: Buffer.from("png-bytes").toString("base64"), mimeType: "image/png" },
+          ],
+          timestamp: 1,
+        },
+      ],
+    };
+    const model = { id: "claude-sonnet-4", api: KIRO_CUSTOM_API, provider: KIRO_PROVIDER_NAME };
+
+    await collectStreamEvents(requireStream(provider.streamSimple?.(model as never, imageContext as never, {})));
+
+    expect(requests[0]?.url).toBe("https://management.us-west-2.kiro.dev/");
+    expect(requests[1]?.url).toBe("https://runtime.us-west-2.kiro.dev/");
+    expect(JSON.parse(requests[1]!.body).profileArn).toBe(profileArn);
+
+    // A second image turn must reuse the cached ARN rather than re-discovering it.
+    await collectStreamEvents(requireStream(provider.streamSimple?.(model as never, imageContext as never, {})));
+
+    expect(requests.filter((request) => request.url.startsWith("https://management."))).toHaveLength(1);
+    expect(JSON.parse(requests[2]!.body).profileArn).toBe(profileArn);
+  });
+
+  it("skips profile discovery for text-only requests", async () => {
+    const fetchMock = vi.fn(async () =>
+      createEventStreamResponse([
+        createEventStreamMessage("assistantResponseEvent", { content: "hi", modelId: "claude-sonnet-4" }),
+        createEventStreamMessage("messageDeltaEvent", { delta: { stop_reason: "end_turn" } }),
+      ]),
+    );
+
+    const provider = createKiroProviderConfig({
+      fetch: fetchMock as unknown as typeof fetch,
+      readAuthFile: async () =>
+        JSON.stringify({
+          kiro: {
+            type: "oauth",
+            access: "text-only-token",
+            refresh: "refresh-token",
+            expires: Date.now() + 60_000,
+            authMode: "identity-center",
+            region: "us-west-2",
+            oidcRegion: "us-west-2",
+            clientId: "client-id",
+            clientSecret: "client-secret",
+          },
+        }),
+    });
+
+    clearKiroProfileArnCache();
+
+    await collectStreamEvents(requireStream(provider.streamSimple?.(
+      { id: "claude-sonnet-4", api: KIRO_CUSTOM_API, provider: KIRO_PROVIDER_NAME } as never,
+      { messages: [{ role: "user", content: "Say hello.", timestamp: 1 }] } as never,
+      {},
+    )));
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String((fetchMock.mock.calls[0] as unknown as [string])[0])).toContain("q.us-west-2.amazonaws.com");
   });
 
   it("logs opt-in stream event shapes without response content", async () => {

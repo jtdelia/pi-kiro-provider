@@ -100,6 +100,45 @@ describe("kiro tool-call support", () => {
     }
   });
 
+  it("preserves Kiro redacted reasoning signatures for tool-call turns", () => {
+    const signature = "opaque-redacted-content";
+    const events = convertKiroStreamEventsToAssistantEvents({
+      model,
+      events: [
+        {
+          toolUseEvent: {
+            toolUseId: "call-signed",
+            name: "read_file",
+            input: '{"path":"image.png"}',
+            stop: true,
+          },
+        },
+        { redactedContent: signature },
+        { type: "message_delta", delta: { stop_reason: "tool_use" } },
+        { type: "message_stop" },
+      ],
+    });
+
+    const done = events.at(-1);
+    expect(done?.type).toBe("done");
+    if (done?.type === "done") {
+      expect(done.message.content).toEqual([
+        {
+          type: "toolCall",
+          id: "call-signed",
+          name: "read_file",
+          arguments: { path: "image.png" },
+        },
+        {
+          type: "thinking",
+          thinking: "",
+          thinkingSignature: signature,
+          redacted: true,
+        },
+      ]);
+    }
+  });
+
   it("partial tool-call JSON is accumulated correctly", () => {
     const events = convertKiroStreamEventsToAssistantEvents({
       model,

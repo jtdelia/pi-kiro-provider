@@ -4,8 +4,10 @@ import { describe, expect, it, vi } from "vitest";
 import kiroExtension from "../extensions/kiro/index";
 import {
   KIRO_FALLBACK_PROVIDER_MODELS,
+  buildKiroListProfilesUrl,
   discoverAndMergeKiroProviderModels,
   discoverKiroModels,
+  discoverKiroProfileArn,
   mergeKiroProviderModels,
   toKiroProviderModelConfig,
 } from "../extensions/kiro/models";
@@ -203,5 +205,45 @@ describe("kiro model discovery", () => {
       "Claude Sonnet 4 (Live)",
     );
     expect(updatedConfig.models.some((model) => model.id === "brand-new-model")).toBe(true);
+  });
+});
+
+describe("kiro profile discovery", () => {
+  it("returns the first profile ARN from ListAvailableProfiles", async () => {
+    const fetchMock = createFetchMock([
+      jsonResponse({
+        profiles: [
+          { arn: "arn:aws:codewhisperer:us-east-1:111122223333:profile/ABC", profileName: "KiroProfile" },
+          { arn: "arn:aws:codewhisperer:us-east-1:111122223333:profile/DEF" },
+        ],
+      }),
+    ]);
+
+    const profileArn = await discoverKiroProfileArn(credentials, {
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+
+    expect(profileArn).toBe("arn:aws:codewhisperer:us-east-1:111122223333:profile/ABC");
+    const [url, init] = (fetchMock as unknown as ReturnType<typeof vi.fn>).mock.calls[0] as [string, RequestInit];
+    expect(url).toBe(buildKiroListProfilesUrl("us-east-1"));
+    expect((init.headers as Record<string, string>)["X-Amz-Target"]).toBe(
+      "AmazonCodeWhispererService.ListAvailableProfiles",
+    );
+  });
+
+  it("returns undefined when the account exposes no profiles", async () => {
+    const fetchMock = createFetchMock([jsonResponse({ profiles: [] })]);
+
+    await expect(
+      discoverKiroProfileArn(credentials, { fetch: fetchMock as unknown as typeof fetch }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("throws when ListAvailableProfiles fails so the caller can fall back", async () => {
+    const fetchMock = createFetchMock([jsonResponse({ message: "nope" }, { status: 403 })]);
+
+    await expect(
+      discoverKiroProfileArn(credentials, { fetch: fetchMock as unknown as typeof fetch }),
+    ).rejects.toThrow("ListAvailableProfiles failed with HTTP 403");
   });
 });
