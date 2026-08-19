@@ -8,7 +8,10 @@ import {
   buildKiroTransportRequest,
   getKiroHistoryByteBudget,
   KIRO_MAX_CURRENT_TOOL_RESULT_TEXT_CHARS,
+  KIRO_MAX_IMAGE_BYTES,
+  KIRO_MAX_IMAGES_PER_REQUEST,
   KIRO_MAX_REQUEST_BODY_BYTES,
+  KiroImageLimitExceededError,
   convertPiToolDefinitions,
   convertToolResultMessageToKiroMessage,
   mapThinkingLevelToKiroThinkingConfig,
@@ -566,6 +569,71 @@ describe("kiro request adapter", () => {
     expect(prepared.payload.conversationState.currentMessage.userInputMessage.images).toEqual([
       { format: "jpeg", source: { bytes: "aW1hZ2U=" } },
     ]);
+  });
+
+  it("rejects more than the allowed number of current-turn images", () => {
+    const images = Array.from({ length: KIRO_MAX_IMAGES_PER_REQUEST + 1 }, (_, index) => ({
+      type: "image" as const,
+      data: Buffer.from(`image-${index}`).toString("base64"),
+      mimeType: "image/png",
+    }));
+
+    expect(() => adaptPiContextToKiroRequest({
+      modelId: "claude-sonnet-4",
+      credentials,
+      context: { messages: [{ role: "user", content: images, timestamp: 1 }] },
+    })).toThrowError(KiroImageLimitExceededError);
+  });
+
+  it("rejects a current-turn image larger than the documented limit", () => {
+    const imageData = Buffer.alloc(KIRO_MAX_IMAGE_BYTES + 1).toString("base64");
+
+    expect(() => adaptPiContextToKiroRequest({
+      modelId: "claude-sonnet-4",
+      credentials,
+      context: {
+        messages: [{
+          role: "user",
+          content: [{ type: "image", data: imageData, mimeType: "image/png" }],
+          timestamp: 1,
+        }],
+      },
+    })).toThrowError(KiroImageLimitExceededError);
+  });
+
+  it("applies image limits to images returned by current-turn tools", () => {
+    const images = Array.from({ length: KIRO_MAX_IMAGES_PER_REQUEST + 1 }, (_, index) => ({
+      type: "image" as const,
+      data: Buffer.from(`tool-image-${index}`).toString("base64"),
+      mimeType: "image/png",
+    }));
+
+    expect(() => adaptPiContextToKiroRequest({
+      modelId: "claude-sonnet-4",
+      credentials,
+      context: {
+        messages: [
+          {
+            role: "assistant",
+            content: [{ type: "toolCall", id: "capture", name: "capture", arguments: {} }],
+            api: "kiro-api",
+            provider: "kiro",
+            model: "claude-sonnet-4",
+            usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+            stopReason: "toolUse",
+            timestamp: 1,
+          },
+          {
+            role: "toolResult",
+            toolCallId: "capture",
+            toolName: "capture",
+            content: images,
+            isError: false,
+            timestamp: 2,
+          },
+        ],
+      },
+    })).toThrowError(KiroImageLimitExceededError);
   });
 
   it("removes historical images but preserves current-turn images", () => {
