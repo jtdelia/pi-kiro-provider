@@ -14,6 +14,7 @@ import {
   KiroImageLimitExceededError,
   convertPiToolDefinitions,
   convertToolResultMessageToKiroMessage,
+  mapNodePlatformToKiroOperatingSystem,
   mapThinkingLevelToKiroThinkingConfig,
   serializeKiroPayload,
 } from "../extensions/kiro/request";
@@ -160,6 +161,33 @@ describe("kiro request adapter", () => {
         },
       },
     });
+  });
+
+  it("leaves image-only tool results empty while preserving the image", () => {
+    const imageData = Buffer.from("screenshot").toString("base64");
+    const message = convertToolResultMessageToKiroMessage(
+      {
+        role: "toolResult",
+        toolCallId: "call-screenshot",
+        toolName: "read",
+        content: [{ type: "image", data: imageData, mimeType: "image/png" }],
+        isError: false,
+        timestamp: 10,
+      },
+      "claude-sonnet-4",
+    );
+
+    expect(message.userInputMessage).toMatchObject({
+      content: "",
+      images: [{ format: "png", source: { bytes: imageData } }],
+    });
+    expect(message.userInputMessage?.userInputMessageContext?.toolResults).toEqual([
+      {
+        toolUseId: "call-screenshot",
+        content: [],
+        status: "success",
+      },
+    ]);
   });
 
   it("converts supported image MIME types to Kiro formats", () => {
@@ -552,6 +580,160 @@ describe("kiro request adapter", () => {
     );
   });
 
+  it("uses the Kiro CLI runtime contract for image turns", () => {
+    const imageData = Buffer.from("image").toString("base64");
+    const prepared = adaptPiContextToKiroRequest({
+      modelId: "claude-sonnet-4",
+      credentials,
+      conversationId: "cli-conv",
+      context: {
+        messages: [
+          { role: "user", content: "Earlier question.", timestamp: 0 },
+          {
+            role: "assistant",
+            content: [{ type: "text", text: "Earlier answer." }],
+            api: "kiro-api",
+            provider: "kiro",
+            model: "claude-sonnet-4",
+            usage: {
+              input: 0,
+              output: 0,
+              cacheRead: 0,
+              cacheWrite: 0,
+              totalTokens: 0,
+              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+            },
+            stopReason: "stop",
+            timestamp: 1,
+          },
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "Describe this image." },
+              { type: "image", data: imageData, mimeType: "image/png" },
+            ],
+            timestamp: 2,
+          },
+        ],
+      },
+    });
+
+    expect(prepared.requestMode).toBe("cli");
+    expect(prepared.endpoint).toBe("https://runtime.us-west-2.kiro.dev/");
+    expect(prepared.payload.conversationState).toMatchObject({
+      conversationId: "cli-conv",
+      chatTriggerType: "MANUAL",
+      agentTaskType: "vibe",
+    });
+    expect(prepared.payload.conversationState.history?.[0]?.userInputMessage).toMatchObject({
+      content: expect.any(String),
+      origin: "KIRO_CLI",
+    });
+    expect(Object.keys(prepared.payload.conversationState.history?.[0]?.userInputMessage ?? {}).sort()).toEqual([
+      "content",
+      "origin",
+    ]);
+    expect(prepared.payload.conversationState.currentMessage.userInputMessage).toMatchObject({
+      origin: "KIRO_CLI",
+      modelId: "claude-sonnet-4",
+      images: [{ format: "png", source: { bytes: imageData } }],
+      userInputMessageContext: {
+        envState: {
+          operatingSystem: mapNodePlatformToKiroOperatingSystem(process.platform),
+          currentWorkingDirectory: process.cwd(),
+        },
+      },
+    });
+
+    const transport = buildKiroTransportRequest({
+      preparedRequest: prepared,
+      accessToken: credentials.access,
+      requestId: "cli-request-id",
+    });
+    expect(transport.url).toBe(prepared.endpoint);
+    expect(transport.init.headers).toEqual(expect.objectContaining({
+      Accept: "*/*",
+      "Content-Type": "application/x-amz-json-1.0",
+      "amz-sdk-request": "attempt=1; max=3",
+      "amz-sdk-invocation-id": "cli-request-id",
+      "x-amz-target": "AmazonCodeWhispererStreamingService.GenerateAssistantResponse",
+      "x-amzn-codewhisperer-optout": "false",
+      "x-kiro-attempt": "1;max=3",
+      "user-agent": expect.stringContaining("app/AmazonQ-For-CLI"),
+      "x-amz-user-agent": expect.stringContaining("m/F app/AmazonQ-For-CLI"),
+    }));
+    expect(Buffer.byteLength(String(transport.init.body), "utf8")).toBe(transport.serializedPayload.utf8Bytes);
+  });
+
+  it("replays CLI assistant tool calls with a message ID before image turns", () => {
+    const imageData = Buffer.from("image").toString("base64");
+    const prepared = adaptPiContextToKiroRequest({
+      modelId: "claude-sonnet-4",
+      credentials,
+      context: {
+        messages: [
+          { role: "user", content: "Inspect the image.", timestamp: 1 },
+          {
+            role: "assistant",
+            content: [{
+              type: "toolCall",
+              id: "call_read_image",
+              name: "read",
+              arguments: { image_paths: ["/tmp/image.png"] },
+            }, {
+              type: "thinking",
+              thinking: "",
+              thinkingSignature: "opaque-redacted-content",
+              redacted: true,
+            }],
+            api: "kiro-api",
+            provider: "kiro",
+            model: "claude-sonnet-4",
+            responseId: "assistant-response-id",
+            usage: {
+              input: 0,
+              output: 0,
+              cacheRead: 0,
+              cacheWrite: 0,
+              totalTokens: 0,
+              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+            },
+            stopReason: "toolUse",
+            timestamp: 2,
+          },
+          {
+            role: "toolResult",
+            toolCallId: "call_read_image",
+            toolName: "read",
+            content: [],
+            isError: false,
+            timestamp: 3,
+          },
+          {
+            role: "user",
+            content: [{ type: "image", data: imageData, mimeType: "image/png" }],
+            timestamp: 4,
+          },
+        ],
+      },
+    });
+
+    const assistant = prepared.payload.conversationState.history?.find(
+      (message) => message.assistantResponseMessage?.toolUses?.length,
+    )?.assistantResponseMessage;
+    expect(assistant).toMatchObject({
+      messageId: "assistant-response-id",
+      content: "",
+      reasoningContent: { redactedContent: "opaque-redacted-content" },
+      toolUses: [{ toolUseId: "call_read_image", name: "read" }],
+    });
+    expect(prepared.payload.conversationState.currentMessage.userInputMessage.images).toEqual([
+      { format: "png", source: { bytes: imageData } },
+    ]);
+    expect(prepared.requestMode).toBe("cli");
+  });
+
+
   it("uses a placeholder for an image-only user prompt", () => {
     const prepared = adaptPiContextToKiroRequest({
       modelId: "claude-sonnet-4",
@@ -792,5 +974,29 @@ describe("kiro request adapter", () => {
       context: { messages: [{ role: "user", content: "hello", timestamp: 1 }] },
     });
     expect(prepared.diagnostics).toMatchObject({ historyByteBudget: 1_700_000, maxRequestBodyBytes: KIRO_MAX_REQUEST_BODY_BYTES });
+  });
+
+  it("maps Node platforms onto the operating systems Kiro accepts", () => {
+    // Kiro answers REQUEST_BODY_INVALID for any other value, including raw "darwin"/"win32".
+    expect(mapNodePlatformToKiroOperatingSystem("darwin")).toBe("macos");
+    expect(mapNodePlatformToKiroOperatingSystem("win32")).toBe("windows");
+    expect(mapNodePlatformToKiroOperatingSystem("linux")).toBe("linux");
+    expect(mapNodePlatformToKiroOperatingSystem("freebsd")).toBeUndefined();
+  });
+
+  it("never sends a raw Node platform in the CLI envState", () => {
+    const prepared = adaptPiContextToKiroRequest({
+      modelId: "claude-sonnet-4",
+      credentials,
+      requestMode: "cli",
+      context: { messages: [{ role: "user", content: "hello", timestamp: 1 }] },
+    });
+
+    const envState = prepared.payload.conversationState.currentMessage.userInputMessage
+      .userInputMessageContext?.envState;
+    expect(envState?.currentWorkingDirectory).toBe(process.cwd());
+    if (envState?.operatingSystem !== undefined) {
+      expect(["linux", "macos", "windows"]).toContain(envState.operatingSystem);
+    }
   });
 });

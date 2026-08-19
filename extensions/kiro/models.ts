@@ -20,9 +20,56 @@ const KIRO_ZERO_COST: Readonly<KiroModelCost> = Object.freeze({
 const KIRO_LIST_MODELS_TARGET = "AmazonCodeWhispererService.ListAvailableModels" as const;
 const KIRO_LIST_MODELS_CONTENT_TYPE = "application/x-amz-json-1.0" as const;
 const KIRO_LIST_MODELS_ORIGIN = "CLI" as const;
+const KIRO_LIST_PROFILES_TARGET = "AmazonCodeWhispererService.ListAvailableProfiles" as const;
 
 export interface KiroModelDiscoveryDependencies extends KiroLoggingDependencies {
   fetch?: typeof fetch;
+}
+
+export function buildKiroListProfilesUrl(region: string): string {
+  return `https://management.${region}.kiro.dev/`;
+}
+
+function extractKiroProfileArn(payload: unknown): string | undefined {
+  if (!isRecord(payload) || !Array.isArray(payload.profiles)) {
+    return undefined;
+  }
+
+  for (const profile of payload.profiles) {
+    if (isRecord(profile) && typeof profile.arn === "string" && profile.arn.trim()) {
+      return profile.arn.trim();
+    }
+  }
+
+  return undefined;
+}
+
+/**
+ * Ask Kiro which profile this token can use. CLI-mode requests are rejected with
+ * `profileArn is required for this request.` when the field is absent, and Identity Center
+ * logins do not return a profile ARN with the tokens, so it has to be looked up.
+ */
+export async function discoverKiroProfileArn(
+  credentials: Pick<KiroOAuthCredentials, "access" | "region">,
+  dependencies: KiroModelDiscoveryDependencies = {},
+): Promise<string | undefined> {
+  const fetchImplementation = getFetchImplementation(dependencies);
+  const response = await fetchImplementation(buildKiroListProfilesUrl(credentials.region), {
+    method: "POST",
+    headers: {
+      "Content-Type": KIRO_LIST_MODELS_CONTENT_TYPE,
+      "X-Amz-Target": KIRO_LIST_PROFILES_TARGET,
+      Authorization: `Bearer ${credentials.access}`,
+      Accept: "*/*",
+    },
+    body: JSON.stringify({}),
+  });
+
+  if (!response.ok) {
+    throw new Error(`ListAvailableProfiles failed with HTTP ${response.status}.`);
+  }
+
+  return extractKiroProfileArn((await response.json()) as unknown);
 }
 
 export interface KiroDiscoveredModelRecord {

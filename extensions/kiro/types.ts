@@ -113,22 +113,35 @@ export interface KiroToolResult {
   status: "success" | "error";
 }
 
+/** Kiro validates `envState.operatingSystem` against this closed set. */
+export type KiroOperatingSystem = "linux" | "macos" | "windows";
+
+export interface KiroEnvironmentState {
+  operatingSystem?: KiroOperatingSystem;
+  currentWorkingDirectory: string;
+}
+
 export interface KiroUserInputMessageContext {
+  envState?: KiroEnvironmentState;
   toolResults?: KiroToolResult[];
   tools?: KiroToolDefinition[];
 }
 
 export interface KiroUserInputMessage {
   content: string;
-  modelId: string;
-  origin: "AI_EDITOR";
+  modelId?: string;
+  origin: "AI_EDITOR" | "KIRO_CLI";
   images?: KiroRequestImage[];
   userInputMessageContext?: KiroUserInputMessageContext;
 }
 
 export interface KiroAssistantResponseMessage {
+  messageId?: string;
   content: string;
   toolUses?: KiroToolUse[];
+  reasoningContent?: {
+    redactedContent: string;
+  };
 }
 
 export interface KiroConversationMessage {
@@ -138,6 +151,7 @@ export interface KiroConversationMessage {
 
 export interface KiroConversationState {
   chatTriggerType: "MANUAL";
+  agentTaskType?: "vibe";
   conversationId?: string;
   history?: KiroConversationMessage[];
   currentMessage: {
@@ -162,9 +176,13 @@ export interface KiroThinkingConfig {
   systemPromptPrefix?: string;
 }
 
+export type KiroRequestMode = "ide" | "cli";
+
 export interface KiroRequestAdapterInput {
   modelId: string;
   context: Context;
+  /** Use the Kiro CLI runtime wire contract. Image turns select this automatically. */
+  requestMode?: KiroRequestMode;
   credentials: Pick<KiroOAuthCredentials, "region" | "profileArn">;
   reasoning?: ThinkingLevel;
   conversationId?: string;
@@ -189,6 +207,7 @@ export interface KiroRequestDiagnostics {
 
 export interface KiroPreparedRequest {
   endpoint: string;
+  requestMode: KiroRequestMode;
   region: string;
   requestedModelId: string;
   serviceModelId: string;
@@ -262,7 +281,9 @@ export function looksLikeKiroMissingProfileArnError(input: {
     return false;
   }
 
-  if (typeof input.status === "number" && input.status !== 401 && input.status !== 403) {
+  // CLI-mode runtime rejects a missing profileArn with 400 (`profileArn is required for this
+  // request.`); IDE-mode surfaces the same gap as 401/403 authorization failures.
+  if (typeof input.status === "number" && input.status !== 400 && input.status !== 401 && input.status !== 403) {
     return false;
   }
 

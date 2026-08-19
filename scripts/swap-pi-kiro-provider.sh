@@ -112,7 +112,11 @@ remove_known_variants() {
 install_local() {
   echo "==> switching to local package"
   remove_known_variants
-  pi install "${SCOPE_ARGS[@]}" "$LOCAL_SOURCE"
+  if [[ ${#SCOPE_ARGS[@]} -gt 0 ]]; then
+    pi install "${SCOPE_ARGS[@]}" "$LOCAL_SOURCE"
+  else
+    pi install "$LOCAL_SOURCE"
+  fi
   echo
   echo "Local package installed from: $LOCAL_SOURCE"
 }
@@ -120,7 +124,11 @@ install_local() {
 install_github() {
   echo "==> switching to GitHub package"
   remove_known_variants
-  pi install "${SCOPE_ARGS[@]}" "$REMOTE_SOURCE"
+  if [[ ${#SCOPE_ARGS[@]} -gt 0 ]]; then
+    pi install "${SCOPE_ARGS[@]}" "$REMOTE_SOURCE"
+  else
+    pi install "$REMOTE_SOURCE"
+  fi
   echo
   echo "GitHub package installed from: $REMOTE_SOURCE"
 }

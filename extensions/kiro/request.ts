@@ -15,8 +15,11 @@ import { KIRO_FALLBACK_MODELS } from "./models";
 import type {
   KiroAssistantResponseMessage,
   KiroConversationMessage,
+  KiroEnvironmentState,
   KiroImageFormat,
+  KiroOperatingSystem,
   KiroPreparedRequest,
+  KiroRequestMode,
   KiroRequestAdapterInput,
   KiroRequestImage,
   KiroRequestPayload,
@@ -29,7 +32,9 @@ import type {
 } from "./types";
 
 const KIRO_REQUEST_ORIGIN = "AI_EDITOR" as const;
+const KIRO_CLI_REQUEST_ORIGIN = "KIRO_CLI" as const;
 const KIRO_CHAT_TRIGGER_TYPE = "MANUAL" as const;
+const KIRO_AGENT_TASK_TYPE = "vibe" as const;
 const KIRO_CONTINUATION_MESSAGE = "Continue";
 const KIRO_RUNNING_TOOLS_MESSAGE = "Running tools...";
 const KIRO_SYNTHETIC_TOOL_CALL_MESSAGE = "I will execute the following tools.";
@@ -40,6 +45,8 @@ const KIRO_IMAGE_ONLY_MESSAGE = "Image provided.";
 const KIRO_GENERATE_ASSISTANT_RESPONSE_PATH = "/generateAssistantResponse";
 const KIRO_TRANSPORT_USER_AGENT = "aws-sdk-js/3.738.0 KiroIDE";
 const KIRO_TRANSPORT_USER_AGENT_DETAIL = `aws-sdk-js/3.738.0 ua/2.1 lang/js api/codewhisperer#3.738.0 m/E KiroIDE`;
+const KIRO_CLI_TRANSPORT_USER_AGENT = "aws-sdk-rust/1.3.15 ua/2.1 api/codewhispererstreaming/0.1.17975 os/linux lang/rust/1.92.0 md/appVersion-2.18.1 app/AmazonQ-For-CLI";
+const KIRO_CLI_TRANSPORT_USER_AGENT_DETAIL = "aws-sdk-rust/1.3.15 ua/2.1 api/codewhispererstreaming/0.1.17975 os/linux lang/rust/1.92.0 m/F app/AmazonQ-For-CLI";
 
 const KIRO_THINKING_BUDGETS: Record<ThinkingLevel, number> = {
   minimal: 1024,
@@ -62,7 +69,7 @@ export const KIRO_MAX_IMAGES_PER_REQUEST = 10;
 export const KIRO_MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 
 export interface KiroTransportRequestInput {
-  preparedRequest: Pick<KiroPreparedRequest, "endpoint" | "payload">;
+  preparedRequest: Pick<KiroPreparedRequest, "endpoint" | "payload" | "requestMode">;
   accessToken: string;
   headers?: Record<string, string>;
   signal?: AbortSignal;
@@ -230,6 +237,10 @@ function toJsonSchemaRecord(schema: unknown): Record<string, unknown> {
   return JSON.parse(JSON.stringify(schema)) as Record<string, unknown>;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
 function truncateMiddle(text: string, maxChars: number): string {
   if (maxChars <= 0 || text.length <= maxChars) {
     return text;
@@ -311,7 +322,7 @@ function combineThinkingAndTextContent(message: AssistantMessage): string {
       continue;
     }
 
-    if (part.type === "thinking") {
+    if (part.type === "thinking" && part.thinking) {
       thinkingParts.push(part.thinking);
     }
   }
@@ -359,6 +370,18 @@ export function convertAssistantMessageToKiroMessage(
   };
 
   if (toolUses.length > 0) {
+    if (message.responseId) {
+      assistantResponseMessage.messageId = message.responseId;
+    }
+
+    const thinkingSignature = message.content.find(
+      (part): part is Extract<AssistantMessage["content"][number], { type: "thinking" }> =>
+        part.type === "thinking" && Boolean(part.thinkingSignature),
+    )?.thinkingSignature;
+    if (thinkingSignature) {
+      assistantResponseMessage.reasoningContent = { redactedContent: thinkingSignature };
+    }
+
     assistantResponseMessage.toolUses = toolUses;
   }
 
@@ -444,7 +467,7 @@ export function convertToolResultMessagesToKiroMessage(
   const images = messages.flatMap(extractToolResultMessageImages);
   const textContent = messages.map(extractToolResultMessageText).filter(Boolean).join("\n\n");
   const userInputMessage: KiroUserInputMessage = {
-    content: textContent || KIRO_DEFAULT_TOOL_RESULT_MESSAGE,
+    content: textContent || (images.length > 0 ? "" : KIRO_DEFAULT_TOOL_RESULT_MESSAGE),
     modelId: serviceModelId,
     origin: KIRO_REQUEST_ORIGIN,
     userInputMessageContext: {
@@ -668,8 +691,98 @@ export function resolveKiroRequestRegion(credentials: KiroRequestAdapterInput["c
   return extractRegionFromProfileArn(credentials.profileArn) ?? credentials.region;
 }
 
-export function buildKiroRequestEndpoint(credentials: KiroRequestAdapterInput["credentials"]): string {
-  return `https://q.${resolveKiroRequestRegion(credentials)}.amazonaws.com${KIRO_GENERATE_ASSISTANT_RESPONSE_PATH}`;
+export function buildKiroRequestEndpoint(
+  credentials: KiroRequestAdapterInput["credentials"],
+  requestMode: KiroRequestMode = "ide",
+): string {
+  const region = resolveKiroRequestRegion(credentials);
+  if (requestMode === "cli") {
+    return `https://runtime.${region}.kiro.dev/`;
+  }
+
+  return `https://q.${region}.amazonaws.com${KIRO_GENERATE_ASSISTANT_RESPONSE_PATH}`;
+}
+
+/**
+ * Kiro rejects the request body outright (`REQUEST_BODY_INVALID`) when
+ * `envState.operatingSystem` is not one of `linux`, `macos`, or `windows`, so Node's
+ * `process.platform` values cannot be forwarded as-is. Unknown platforms omit the field,
+ * which the service accepts.
+ */
+export function mapNodePlatformToKiroOperatingSystem(platform: string): KiroOperatingSystem | undefined {
+  switch (platform) {
+    case "darwin":
+      return "macos";
+    case "win32":
+      return "windows";
+    case "linux":
+      return "linux";
+    default:
+      return undefined;
+  }
+}
+
+function getKiroEnvironmentState(): KiroEnvironmentState {
+  const operatingSystem = mapNodePlatformToKiroOperatingSystem(process.platform);
+  return {
+    ...(operatingSystem ? { operatingSystem } : {}),
+    currentWorkingDirectory: process.cwd(),
+  };
+}
+
+function applyKiroRequestMode(payload: KiroRequestPayload, requestMode: KiroRequestMode): KiroRequestPayload {
+  if (requestMode === "ide") {
+    return payload;
+  }
+
+  const convertHistoricalUserMessage = (message: KiroUserInputMessage): KiroUserInputMessage => ({
+    content: message.content,
+    origin: KIRO_CLI_REQUEST_ORIGIN,
+  });
+
+  const convertCurrentUserMessage = (message: KiroUserInputMessage): KiroUserInputMessage => ({
+    ...message,
+    origin: KIRO_CLI_REQUEST_ORIGIN,
+  });
+
+  const convertHistoricalAssistantMessage = (
+    message: KiroAssistantResponseMessage,
+  ): KiroAssistantResponseMessage => message.toolUses?.length
+    ? { ...message, content: "", messageId: message.messageId ?? randomUUID() }
+    : message;
+
+  const convertHistoricalMessage = (message: KiroConversationMessage): KiroConversationMessage => {
+    if (message.userInputMessage) {
+      return { ...message, userInputMessage: convertHistoricalUserMessage(message.userInputMessage) };
+    }
+
+    if (message.assistantResponseMessage) {
+      return {
+        ...message,
+        assistantResponseMessage: convertHistoricalAssistantMessage(message.assistantResponseMessage),
+      };
+    }
+
+    return message;
+  };
+
+  return {
+    ...payload,
+    conversationState: {
+      ...payload.conversationState,
+      agentTaskType: KIRO_AGENT_TASK_TYPE,
+      history: payload.conversationState.history?.map(convertHistoricalMessage),
+      currentMessage: {
+        userInputMessage: {
+          ...convertCurrentUserMessage(payload.conversationState.currentMessage.userInputMessage),
+          userInputMessageContext: {
+            envState: getKiroEnvironmentState(),
+            ...(payload.conversationState.currentMessage.userInputMessage.userInputMessageContext ?? {}),
+          },
+        },
+      },
+    },
+  };
 }
 
 function createPlaceholderCurrentMessage(serviceModelId: string): KiroUserInputMessage {
@@ -760,13 +873,15 @@ function cloneKiroUserInputMessage(message: KiroUserInputMessage): KiroUserInput
 
 function cloneKiroHistory(history: readonly KiroConversationMessage[]): KiroConversationMessage[] {
   return history.map((message) => ({
-    userInputMessage: message.userInputMessage ? cloneKiroUserInputMessage(message.userInputMessage) : undefined,
-    assistantResponseMessage: message.assistantResponseMessage
+    ...(message.userInputMessage ? { userInputMessage: cloneKiroUserInputMessage(message.userInputMessage) } : {}),
+    ...(message.assistantResponseMessage
       ? {
-          ...message.assistantResponseMessage,
-          toolUses: message.assistantResponseMessage.toolUses?.map((toolUse) => ({ ...toolUse })),
+          assistantResponseMessage: {
+            ...message.assistantResponseMessage,
+            toolUses: message.assistantResponseMessage.toolUses?.map((toolUse) => ({ ...toolUse })),
+          },
         }
-      : undefined,
+      : {}),
   }));
 }
 
@@ -1095,7 +1210,8 @@ function alignCurrentToolResultsWithHistory(input: {
 
   const nextCurrentMessage: KiroUserInputMessage = {
     ...input.currentMessage,
-    content: [input.currentMessage.content, ...extraTextBlocks].filter(Boolean).join("\n\n") || KIRO_DEFAULT_TOOL_RESULT_MESSAGE,
+    content: [input.currentMessage.content, ...extraTextBlocks].filter(Boolean).join("\n\n") ||
+      (input.currentMessage.images?.length ? "" : KIRO_DEFAULT_TOOL_RESULT_MESSAGE),
     userInputMessageContext: {
       ...(input.currentMessage.userInputMessageContext ?? {}),
     },
@@ -1186,6 +1302,7 @@ function fitKiroPayloadToSize(input: {
   conversationId?: string;
   profileArn?: string;
   historyByteBudget: number;
+  requestMode: KiroRequestMode;
 }): {
   payload: KiroRequestPayload;
   serialized: KiroSerializedPayload;
@@ -1209,16 +1326,19 @@ function fitKiroPayloadToSize(input: {
   let removedOptionalToolDefinitionCount = 0;
 
   const buildPayload = (): KiroRequestPayload => {
-    const wireHistory = repairKiroWireHistory(history, currentMessage.modelId);
-    return {
-      conversationState: {
-        chatTriggerType: KIRO_CHAT_TRIGGER_TYPE,
-        conversationId: input.conversationId,
-        history: wireHistory.length > 0 ? wireHistory : undefined,
-        currentMessage: { userInputMessage: currentMessage },
+    const wireHistory = repairKiroWireHistory(history, currentMessage.modelId ?? input.serviceModelId);
+    return applyKiroRequestMode(
+      {
+        conversationState: {
+          chatTriggerType: KIRO_CHAT_TRIGGER_TYPE,
+          conversationId: input.conversationId,
+          history: wireHistory.length > 0 ? wireHistory : undefined,
+          currentMessage: { userInputMessage: currentMessage },
+        },
+        profileArn: input.profileArn,
       },
-      profileArn: input.profileArn,
-    };
+      input.requestMode,
+    );
   };
 
   let payload = buildPayload();
@@ -1339,6 +1459,18 @@ function buildKiroCurrentMessage(
   };
 }
 
+/**
+ * Whether a context will be sent over the CLI wire contract, which is selected by image turns
+ * and, unlike IDE mode, requires a `profileArn`. Callers use this to avoid paying for profile
+ * discovery on text-only requests.
+ */
+export function kiroContextRequiresCliMode(context: Pick<Context, "messages">): boolean {
+  return context.messages.some((message) => {
+    const content = (message as { content?: unknown }).content;
+    return Array.isArray(content) && content.some((part) => isRecord(part) && part.type === "image");
+  });
+}
+
 export function adaptPiContextToKiroRequest(input: KiroRequestAdapterInput): KiroPreparedRequest {
   if (input.context.messages.length === 0) {
     throw new Error("Kiro request adapter requires at least one message.");
@@ -1369,6 +1501,7 @@ export function adaptPiContextToKiroRequest(input: KiroRequestAdapterInput): Kir
     effectiveSystemPrompt || undefined,
   );
   const currentWithHistoryTools = ensureHistoryToolDefinitions(injected.history, injected.currentMessage);
+  const requestMode = input.requestMode ?? (currentWithHistoryTools.images?.length ? "cli" : "ide");
   const historyByteBudget = getKiroHistoryByteBudget(input.contextWindow);
   const fitted = fitKiroPayloadToSize({
     history: injected.history,
@@ -1378,31 +1511,34 @@ export function adaptPiContextToKiroRequest(input: KiroRequestAdapterInput): Kir
     conversationId: input.conversationId,
     profileArn: input.credentials.profileArn,
     historyByteBudget,
+    requestMode,
   });
-  const endpoint = buildKiroRequestEndpoint(input.credentials);
+  const payload = fitted.payload;
+  const endpoint = buildKiroRequestEndpoint(input.credentials, requestMode);
   const region = resolveKiroRequestRegion(input.credentials);
 
   return {
     endpoint,
     region,
+    requestMode,
     requestedModelId: input.modelId,
     serviceModelId,
     effectiveSystemPrompt: effectiveSystemPrompt || undefined,
     thinkingConfig,
-    payload: fitted.payload,
+    payload,
     diagnostics: {
       toolResultTruncationCount: countKiroToolResultTruncations(
-        fitted.payload.conversationState.history ?? [],
-        fitted.payload.conversationState.currentMessage.userInputMessage,
+        payload.conversationState.history ?? [],
+        payload.conversationState.currentMessage.userInputMessage,
       ),
       aggregateToolResultTruncationCount: fitted.diagnostics.aggregateToolResultTruncationCount,
-      currentMessageTruncated: fitted.payload.conversationState.currentMessage.userInputMessage.content.includes(
+      currentMessageTruncated: payload.conversationState.currentMessage.userInputMessage.content.includes(
         KIRO_TRUNCATION_TOKEN,
       ),
       prunedHistoryMessageCount: fitted.diagnostics.prunedHistoryMessageCount,
       removedHistoricalImageCount: fitted.diagnostics.removedHistoricalImageCount,
       removedOptionalToolDefinitionCount: fitted.diagnostics.removedOptionalToolDefinitionCount,
-      finalPayloadUtf8Bytes: fitted.serialized.utf8Bytes,
+      finalPayloadUtf8Bytes: serializeKiroPayload(payload).utf8Bytes,
       maxRequestBodyBytes: KIRO_MAX_REQUEST_BODY_BYTES,
       requestFitsBudget: true,
       historyByteBudget,
@@ -1414,22 +1550,28 @@ export function buildKiroTransportHeaders(input: {
   accessToken: string;
   headers?: Record<string, string>;
   requestId?: string;
+  requestMode?: KiroRequestMode;
 }): Record<string, string> {
   const accessToken = input.accessToken.trim();
   if (!accessToken) {
     throw new Error("Kiro transport requires an access token.");
   }
 
+  const isCli = input.requestMode === "cli";
   return {
-    Accept: "text/event-stream, application/json",
-    "Content-Type": "application/json",
+    Accept: isCli ? "*/*" : "text/event-stream, application/json",
+    "Content-Type": isCli ? "application/x-amz-json-1.0" : "application/json",
     "amz-sdk-invocation-id": input.requestId ?? randomUUID(),
-    "amz-sdk-request": "attempt=1; max=1",
+    "amz-sdk-request": isCli ? "attempt=1; max=3" : "attempt=1; max=1",
     Authorization: `Bearer ${accessToken}`,
     Connection: "keep-alive",
-    "user-agent": KIRO_TRANSPORT_USER_AGENT_DETAIL,
-    "x-amz-user-agent": KIRO_TRANSPORT_USER_AGENT,
-    "x-amzn-kiro-agent-mode": "vibe",
+    "user-agent": isCli ? KIRO_CLI_TRANSPORT_USER_AGENT : KIRO_TRANSPORT_USER_AGENT_DETAIL,
+    "x-amz-user-agent": isCli ? KIRO_CLI_TRANSPORT_USER_AGENT_DETAIL : KIRO_TRANSPORT_USER_AGENT,
+    ...(isCli ? {
+      "x-amz-target": "AmazonCodeWhispererStreamingService.GenerateAssistantResponse",
+      "x-amzn-codewhisperer-optout": "false",
+      "x-kiro-attempt": "1;max=3",
+    } : { "x-amzn-kiro-agent-mode": "vibe" }),
     ...(input.headers ?? {}),
   };
 }
@@ -1448,6 +1590,7 @@ export function buildKiroTransportRequest(input: KiroTransportRequestInput): {
         accessToken: input.accessToken,
         headers: input.headers,
         requestId: input.requestId,
+        requestMode: input.preparedRequest.requestMode,
       }),
       body: serializedPayload.body,
       signal: input.signal,
