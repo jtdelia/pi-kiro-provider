@@ -123,6 +123,157 @@ describe("kiro request adapter", () => {
     ]);
   });
 
+  it("forwards tool-result images on the Kiro user-input message", () => {
+    const imageData = Buffer.from("screenshot").toString("base64");
+    const message = convertToolResultMessageToKiroMessage(
+      {
+        role: "toolResult",
+        toolCallId: "call-screenshot",
+        toolName: "screenshot",
+        content: [
+          { type: "text", text: "Screenshot captured." },
+          { type: "image", data: imageData, mimeType: "image/png" },
+        ],
+        isError: false,
+        timestamp: 10,
+      },
+      "claude-sonnet-4",
+    );
+
+    expect(message).toEqual({
+      userInputMessage: {
+        content: "Screenshot captured.",
+        modelId: "claude-sonnet-4",
+        origin: "AI_EDITOR",
+        images: [{ format: "png", source: { bytes: imageData } }],
+        userInputMessageContext: {
+          toolResults: [
+            {
+              toolUseId: "call-screenshot",
+              content: [{ text: "Screenshot captured." }],
+              status: "success",
+            },
+          ],
+        },
+      },
+    });
+  });
+
+  it("converts supported image MIME types to Kiro formats", () => {
+    const prepared = adaptPiContextToKiroRequest({
+      modelId: "claude-sonnet-4",
+      credentials,
+      context: {
+        messages: [{
+          role: "user",
+          content: [
+            { type: "image", data: "jpeg", mimeType: "IMAGE/JPG" },
+            { type: "image", data: "png", mimeType: "image/png; charset=binary" },
+            { type: "image", data: "gif", mimeType: "image/gif" },
+            { type: "image", data: "webp", mimeType: "image/webp" },
+          ],
+          timestamp: 1,
+        }],
+      },
+    });
+
+    expect(prepared.payload.conversationState.currentMessage.userInputMessage.images).toEqual([
+      { format: "jpeg", source: { bytes: "jpeg" } },
+      { format: "png", source: { bytes: "png" } },
+      { format: "gif", source: { bytes: "gif" } },
+      { format: "webp", source: { bytes: "webp" } },
+    ]);
+  });
+
+  it("preserves multiple current tool-result images and strips historical tool images", () => {
+    const firstImage = Buffer.from("first").toString("base64");
+    const secondImage = Buffer.from("second").toString("base64");
+    const historicalImage = Buffer.from("historical").toString("base64");
+    const prepared = adaptPiContextToKiroRequest({
+      modelId: "claude-sonnet-4",
+      credentials,
+      context: {
+        messages: [
+          { role: "user", content: "historical request", timestamp: 1 },
+          {
+            role: "assistant",
+            content: [{ type: "toolCall", id: "old-call", name: "screenshot", arguments: {} }],
+            api: "kiro-api",
+            provider: "kiro",
+            model: "claude-sonnet-4",
+            usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+            stopReason: "toolUse",
+            timestamp: 2,
+          },
+          {
+            role: "toolResult",
+            toolCallId: "old-call",
+            toolName: "screenshot",
+            content: [{ type: "image", data: historicalImage, mimeType: "image/png" }],
+            isError: false,
+            timestamp: 3,
+          },
+          { role: "user", content: "current request", timestamp: 4 },
+          {
+            role: "assistant",
+            content: [
+              { type: "toolCall", id: "current-call", name: "capture", arguments: {} },
+              { type: "toolCall", id: "failed-call", name: "capture", arguments: {} },
+            ],
+            api: "kiro-api",
+            provider: "kiro",
+            model: "claude-sonnet-4",
+            usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+            stopReason: "toolUse",
+            timestamp: 5,
+          },
+          {
+            role: "toolResult",
+            toolCallId: "current-call",
+            toolName: "capture",
+            content: [
+              { type: "text", text: "Captured." },
+              { type: "image", data: firstImage, mimeType: "image/png" },
+              { type: "image", data: secondImage, mimeType: "image/webp" },
+            ],
+            isError: false,
+            timestamp: 6,
+          },
+          {
+            role: "toolResult",
+            toolCallId: "failed-call",
+            toolName: "capture",
+            content: [{ type: "image", data: firstImage, mimeType: "image/jpeg" }],
+            isError: true,
+            timestamp: 7,
+          },
+        ],
+      },
+    });
+
+    const current = prepared.payload.conversationState.currentMessage.userInputMessage;
+    expect(current.images).toEqual([
+      { format: "png", source: { bytes: firstImage } },
+      { format: "webp", source: { bytes: secondImage } },
+      { format: "jpeg", source: { bytes: firstImage } },
+    ]);
+    expect(current.userInputMessageContext?.toolResults).toEqual([
+      {
+        toolUseId: "current-call",
+        content: [{ text: "Captured." }],
+        status: "success",
+      },
+      {
+        toolUseId: "failed-call",
+        content: [],
+        status: "error",
+      },
+    ]);
+    expect(prepared.payload.conversationState.history?.some((entry) =>
+      entry.userInputMessage?.images?.some((image) => image.source.bytes === historicalImage),
+    )).toBe(false);
+  });
+
   it("converts tool result messages correctly", () => {
     const message = convertToolResultMessageToKiroMessage(
       {
@@ -374,6 +525,47 @@ describe("kiro request adapter", () => {
     });
     expect(transport.init.body).toBe(serialized.body);
     expect(transport.serializedPayload).toEqual(serialized);
+  });
+
+  it("serializes user image bytes as the original base64 string", () => {
+    const imageData = Buffer.from("image").toString("base64");
+    const prepared = adaptPiContextToKiroRequest({
+      modelId: "claude-sonnet-4",
+      credentials,
+      context: {
+        messages: [{
+          role: "user",
+          content: [{ type: "image", data: imageData, mimeType: "image/png" }],
+          timestamp: 1,
+        }],
+      },
+    });
+
+    const currentImage = prepared.payload.conversationState.currentMessage.userInputMessage.images?.[0];
+    expect(currentImage).toEqual({ format: "png", source: { bytes: imageData } });
+    expect(typeof currentImage?.source.bytes).toBe("string");
+    expect(JSON.parse(JSON.stringify(prepared.payload)).conversationState.currentMessage.userInputMessage.images[0].source.bytes).toBe(
+      imageData,
+    );
+  });
+
+  it("uses a placeholder for an image-only user prompt", () => {
+    const prepared = adaptPiContextToKiroRequest({
+      modelId: "claude-sonnet-4",
+      credentials,
+      context: {
+        messages: [{
+          role: "user",
+          content: [{ type: "image", data: "aW1hZ2U=", mimeType: "image/jpeg" }],
+          timestamp: 1,
+        }],
+      },
+    });
+
+    expect(prepared.payload.conversationState.currentMessage.userInputMessage.content).toBe("Image provided.");
+    expect(prepared.payload.conversationState.currentMessage.userInputMessage.images).toEqual([
+      { format: "jpeg", source: { bytes: "aW1hZ2U=" } },
+    ]);
   });
 
   it("removes historical images but preserves current-turn images", () => {

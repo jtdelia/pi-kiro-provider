@@ -1,6 +1,6 @@
 {
   "name": "pi-kiro-provider",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Kiro provider extension package for pi.",
   "type": "module",
   "keywords": [
@@ -21,7 +21,9 @@
   },
   "homepage": "https://github.com/jtdelia/pi-kiro-provider#readme",
   "pi": {
-    "extensions": ["./extensions/kiro.ts"]
+    "extensions": [
+      "./extensions/kiro.ts"
+    ]
   },
   "scripts": {
     "lint": "eslint .",
