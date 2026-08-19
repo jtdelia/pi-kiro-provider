@@ -78,10 +78,12 @@ export interface KiroNormalizedModelDefinition extends KiroProviderModelConfig {
   notes?: string;
 }
 
+export type KiroImageFormat = "jpeg" | "png" | "gif" | "webp";
+
 export interface KiroRequestImage {
-  format: string;
+  format: KiroImageFormat;
   source: {
-    bytes: Uint8Array;
+    bytes: string;
   };
 }
 

@@ -15,6 +15,7 @@ import { KIRO_FALLBACK_MODELS } from "./models";
 import type {
   KiroAssistantResponseMessage,
   KiroConversationMessage,
+  KiroImageFormat,
   KiroPreparedRequest,
   KiroRequestAdapterInput,
   KiroRequestImage,
@@ -35,6 +36,7 @@ const KIRO_SYNTHETIC_TOOL_CALL_MESSAGE = "I will execute the following tools.";
 const KIRO_SYNTHETIC_TOOL_RESULT_MESSAGE = "No result provided";
 const KIRO_EMPTY_ASSISTANT_MESSAGE = "(empty)";
 const KIRO_DEFAULT_TOOL_RESULT_MESSAGE = "Tool results provided.";
+const KIRO_IMAGE_ONLY_MESSAGE = "Image provided.";
 const KIRO_GENERATE_ASSISTANT_RESPONSE_PATH = "/generateAssistantResponse";
 const KIRO_TRANSPORT_USER_AGENT = "aws-sdk-js/3.738.0 KiroIDE";
 const KIRO_TRANSPORT_USER_AGENT_DETAIL = `aws-sdk-js/3.738.0 ua/2.1 lang/js api/codewhisperer#3.738.0 m/E KiroIDE`;
@@ -54,6 +56,10 @@ export const KIRO_MAX_CURRENT_TOOL_RESULT_TEXT_CHARS = 200_000;
 const KIRO_DEFAULT_HISTORY_BYTE_BUDGET = 500_000;
 /** Conservative client guardrail, not a documented Kiro service limit. */
 export const KIRO_MAX_REQUEST_BODY_BYTES = 650_000;
+/** Documented Kiro CLI guidance: no more than ten images per request. */
+export const KIRO_MAX_IMAGES_PER_REQUEST = 10;
+/** Documented Kiro CLI guidance: images should be under 10 MiB each. */
+export const KIRO_MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 
 export interface KiroTransportRequestInput {
   preparedRequest: Pick<KiroPreparedRequest, "endpoint" | "payload">;
@@ -116,7 +122,55 @@ function createKiroContextLengthExceededError(input: {
   return new KiroContextLengthExceededError(input);
 }
 
+export class KiroImageLimitExceededError extends Error {
+  readonly reason: "count" | "size";
+  readonly imageCount: number;
+  readonly imageBytes?: number;
+
+  constructor(input: { reason: "count"; imageCount: number } | { reason: "size"; imageCount: number; imageBytes: number }) {
+    const message = input.reason === "count"
+      ? `Kiro request contains ${input.imageCount} images, exceeding the ${KIRO_MAX_IMAGES_PER_REQUEST}-image limit.`
+      : `Kiro image is ${input.imageBytes} bytes, exceeding the ${KIRO_MAX_IMAGE_BYTES}-byte per-image limit.`;
+    super(message);
+    this.name = "KiroImageLimitExceededError";
+    this.reason = input.reason;
+    this.imageCount = input.imageCount;
+    if (input.reason === "size") {
+      this.imageBytes = input.imageBytes;
+    }
+  }
+}
+
+function getKiroImageByteLength(image: KiroRequestImage): number {
+  return Buffer.byteLength(Buffer.from(image.source.bytes, "base64"));
+}
+
+export function validateKiroImages(images: readonly KiroRequestImage[]): void {
+  if (images.length > KIRO_MAX_IMAGES_PER_REQUEST) {
+    throw new KiroImageLimitExceededError({ reason: "count", imageCount: images.length });
+  }
+
+  for (const image of images) {
+    const imageBytes = getKiroImageByteLength(image);
+    if (imageBytes >= KIRO_MAX_IMAGE_BYTES) {
+      throw new KiroImageLimitExceededError({ reason: "size", imageCount: images.length, imageBytes });
+    }
+  }
+}
+
+function getKiroPayloadImages(payload: KiroRequestPayload): KiroRequestImage[] {
+  return [
+    ...(payload.conversationState.history ?? []).flatMap((message) => message.userInputMessage?.images ?? []),
+    ...(payload.conversationState.currentMessage.userInputMessage.images ?? []),
+  ];
+}
+
+export function validateKiroPayloadImages(payload: KiroRequestPayload): void {
+  validateKiroImages(getKiroPayloadImages(payload));
+}
+
 export function assertKiroPayloadFitsBudget(payload: KiroRequestPayload): KiroSerializedPayload {
+  validateKiroPayloadImages(payload);
   const serialized = serializeKiroPayload(payload);
   if (serialized.utf8Bytes > KIRO_MAX_REQUEST_BODY_BYTES) {
     throw createKiroContextLengthExceededError({ utf8Bytes: serialized.utf8Bytes });
@@ -151,22 +205,23 @@ function extractTextFromUserContent(content: UserMessage["content"]): string {
     .join("");
 }
 
-function convertBase64ToBytes(data: string): Uint8Array {
-  return Uint8Array.from(Buffer.from(data, "base64"));
+function normalizeKiroImageFormat(mimeType: string): KiroImageFormat {
+  const [type, subtypeWithParameters] = mimeType.trim().toLowerCase().split("/", 2);
+  const subtype = subtypeWithParameters?.split(";", 1)[0]?.trim();
+  const format = subtype === "jpg" ? "jpeg" : subtype;
+
+  if (type !== "image" || !format || !["jpeg", "png", "gif", "webp"].includes(format)) {
+    throw new Error(`Unsupported image mime type: ${mimeType}`);
+  }
+
+  return format as KiroImageFormat;
 }
 
 export function convertPiImageToKiroImage(image: { data: string; mimeType: string }): KiroRequestImage {
-  const mimeType = image.mimeType.trim().toLowerCase();
-  const format = mimeType.split("/")[1];
-
-  if (!format) {
-    throw new Error(`Unsupported image mime type: ${image.mimeType}`);
-  }
-
   return {
-    format,
+    format: normalizeKiroImageFormat(image.mimeType),
     source: {
-      bytes: convertBase64ToBytes(image.data),
+      bytes: image.data,
     },
   };
 }
@@ -316,8 +371,9 @@ export function convertUserMessageToKiroMessage(
   message: UserMessage,
   serviceModelId: string,
 ): KiroConversationMessage {
+  const textContent = extractTextFromUserContent(message.content);
   const userInputMessage: KiroUserInputMessage = {
-    content: extractTextFromUserContent(message.content),
+    content: textContent,
     modelId: serviceModelId,
     origin: KIRO_REQUEST_ORIGIN,
   };
@@ -329,6 +385,9 @@ export function convertUserMessageToKiroMessage(
 
     if (images.length > 0) {
       userInputMessage.images = images;
+      if (!textContent) {
+        userInputMessage.content = KIRO_IMAGE_ONLY_MESSAGE;
+      }
     }
   }
 
@@ -338,19 +397,19 @@ export function convertUserMessageToKiroMessage(
 }
 
 export function convertToolResultMessageToKiroToolResult(message: ToolResultMessage): KiroToolResult {
-  const content = message.content.map((part) => {
-    if (part.type === "image") {
-      throw new Error("Kiro tool result image attachments are not supported yet.");
-    }
-
-    return { text: truncateToolResultText(part.text) };
-  });
-
   return {
     toolUseId: message.toolCallId,
-    content,
+    content: message.content
+      .filter((part): part is Extract<ToolResultMessage["content"][number], { type: "text" }> => part.type === "text")
+      .map((part) => ({ text: truncateToolResultText(part.text) })),
     status: message.isError ? "error" : "success",
   };
+}
+
+function extractToolResultMessageImages(message: ToolResultMessage): KiroRequestImage[] {
+  return message.content
+    .filter((part): part is Extract<ToolResultMessage["content"][number], { type: "image" }> => part.type === "image")
+    .map((part) => convertPiImageToKiroImage({ data: part.data, mimeType: part.mimeType }));
 }
 
 function dedupeKiroToolResults(toolResults: readonly KiroToolResult[]): KiroToolResult[] {
@@ -382,18 +441,22 @@ export function convertToolResultMessagesToKiroMessage(
   serviceModelId: string,
 ): KiroConversationMessage {
   const toolResults = dedupeKiroToolResults(messages.map(convertToolResultMessageToKiroToolResult));
+  const images = messages.flatMap(extractToolResultMessageImages);
   const textContent = messages.map(extractToolResultMessageText).filter(Boolean).join("\n\n");
-
-  return {
-    userInputMessage: {
-      content: textContent || KIRO_DEFAULT_TOOL_RESULT_MESSAGE,
-      modelId: serviceModelId,
-      origin: KIRO_REQUEST_ORIGIN,
-      userInputMessageContext: {
-        toolResults,
-      },
+  const userInputMessage: KiroUserInputMessage = {
+    content: textContent || KIRO_DEFAULT_TOOL_RESULT_MESSAGE,
+    modelId: serviceModelId,
+    origin: KIRO_REQUEST_ORIGIN,
+    userInputMessageContext: {
+      toolResults,
     },
   };
+
+  if (images.length > 0) {
+    userInputMessage.images = images;
+  }
+
+  return { userInputMessage };
 }
 
 export function convertToolResultMessageToKiroMessage(
@@ -1135,6 +1198,7 @@ function fitKiroPayloadToSize(input: {
 } {
   const strippedHistory = stripHistoricalImages(input.history);
   let currentMessage = applyPerResultToolResultBudget(input.currentMessage);
+  validateKiroImages(currentMessage.images ?? []);
   const protectedToolUseIds = getCurrentToolResultIds(currentMessage);
   let history = pruneKiroHistoryToByteBudget(
     strippedHistory.history,

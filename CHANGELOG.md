@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.3] - 2026-08-18
+
+### Fixed
+
+- Preserve base64 image data in Kiro request payloads instead of serializing decoded bytes as typed-array objects.
+- Forward images returned by tools alongside their text results.
+- Normalize supported image formats and preserve current-turn image attachments while removing historical images.
+
 ## [0.1.2] - 2026-08-01
 
 ### Fixed
