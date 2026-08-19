@@ -56,6 +56,10 @@ export const KIRO_MAX_CURRENT_TOOL_RESULT_TEXT_CHARS = 200_000;
 const KIRO_DEFAULT_HISTORY_BYTE_BUDGET = 500_000;
 /** Conservative client guardrail, not a documented Kiro service limit. */
 export const KIRO_MAX_REQUEST_BODY_BYTES = 650_000;
+/** Documented Kiro CLI guidance: no more than ten images per request. */
+export const KIRO_MAX_IMAGES_PER_REQUEST = 10;
+/** Documented Kiro CLI guidance: images should be under 10 MiB each. */
+export const KIRO_MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 
 export interface KiroTransportRequestInput {
   preparedRequest: Pick<KiroPreparedRequest, "endpoint" | "payload">;
@@ -118,7 +122,55 @@ function createKiroContextLengthExceededError(input: {
   return new KiroContextLengthExceededError(input);
 }
 
+export class KiroImageLimitExceededError extends Error {
+  readonly reason: "count" | "size";
+  readonly imageCount: number;
+  readonly imageBytes?: number;
+
+  constructor(input: { reason: "count"; imageCount: number } | { reason: "size"; imageCount: number; imageBytes: number }) {
+    const message = input.reason === "count"
+      ? `Kiro request contains ${input.imageCount} images, exceeding the ${KIRO_MAX_IMAGES_PER_REQUEST}-image limit.`
+      : `Kiro image is ${input.imageBytes} bytes, exceeding the ${KIRO_MAX_IMAGE_BYTES}-byte per-image limit.`;
+    super(message);
+    this.name = "KiroImageLimitExceededError";
+    this.reason = input.reason;
+    this.imageCount = input.imageCount;
+    if (input.reason === "size") {
+      this.imageBytes = input.imageBytes;
+    }
+  }
+}
+
+function getKiroImageByteLength(image: KiroRequestImage): number {
+  return Buffer.byteLength(Buffer.from(image.source.bytes, "base64"));
+}
+
+export function validateKiroImages(images: readonly KiroRequestImage[]): void {
+  if (images.length > KIRO_MAX_IMAGES_PER_REQUEST) {
+    throw new KiroImageLimitExceededError({ reason: "count", imageCount: images.length });
+  }
+
+  for (const image of images) {
+    const imageBytes = getKiroImageByteLength(image);
+    if (imageBytes >= KIRO_MAX_IMAGE_BYTES) {
+      throw new KiroImageLimitExceededError({ reason: "size", imageCount: images.length, imageBytes });
+    }
+  }
+}
+
+function getKiroPayloadImages(payload: KiroRequestPayload): KiroRequestImage[] {
+  return [
+    ...(payload.conversationState.history ?? []).flatMap((message) => message.userInputMessage?.images ?? []),
+    ...(payload.conversationState.currentMessage.userInputMessage.images ?? []),
+  ];
+}
+
+export function validateKiroPayloadImages(payload: KiroRequestPayload): void {
+  validateKiroImages(getKiroPayloadImages(payload));
+}
+
 export function assertKiroPayloadFitsBudget(payload: KiroRequestPayload): KiroSerializedPayload {
+  validateKiroPayloadImages(payload);
   const serialized = serializeKiroPayload(payload);
   if (serialized.utf8Bytes > KIRO_MAX_REQUEST_BODY_BYTES) {
     throw createKiroContextLengthExceededError({ utf8Bytes: serialized.utf8Bytes });
@@ -1146,6 +1198,7 @@ function fitKiroPayloadToSize(input: {
 } {
   const strippedHistory = stripHistoricalImages(input.history);
   let currentMessage = applyPerResultToolResultBudget(input.currentMessage);
+  validateKiroImages(currentMessage.images ?? []);
   const protectedToolUseIds = getCurrentToolResultIds(currentMessage);
   let history = pruneKiroHistoryToByteBudget(
     strippedHistory.history,
