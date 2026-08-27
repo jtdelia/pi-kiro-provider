@@ -92,6 +92,7 @@ describe("kiro logging", () => {
 
     try {
       const provider = createKiroProviderConfig({
+        env: {},
         logPath,
         fetch: vi.fn(async () => new Response("boom", { status: 500 })) as unknown as typeof fetch,
         readAuthFile: async () =>
@@ -202,6 +203,7 @@ describe("kiro logging", () => {
 
     try {
       const provider = createKiroProviderConfig({
+        env: {},
         logPath,
         fetch: vi.fn(async () => new Response("boom", { status: 500 })) as unknown as typeof fetch,
         readAuthFile: async () =>

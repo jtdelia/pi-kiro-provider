@@ -1,3 +1,4 @@
+import { getSupportedThinkingLevels } from "@mariozechner/pi-ai";
 import { describe, expect, it } from "vitest";
 
 import { KIRO_FALLBACK_MODEL_CATALOG } from "../extensions/kiro/fallback-models";
@@ -74,6 +75,8 @@ describe("kiro shared types and fallback models", () => {
 
     expect(reasoningModel?.thinkingLevelMap).toEqual({ xhigh: "max" });
     expect(nonReasoningModel?.thinkingLevelMap).toBeUndefined();
+    expect(getSupportedThinkingLevels(reasoningModel as never)).toContain("xhigh");
+    expect(getSupportedThinkingLevels(nonReasoningModel as never)).toEqual(["off"]);
   });
 
   it("returns provider-model-shaped entries for the full fallback list", () => {

@@ -348,9 +348,6 @@ describe("kiro request adapter", () => {
     expect(mapThinkingLevelToKiroThinkingConfig("xhigh")).toEqual({
       enabled: true,
       level: "xhigh",
-      budgetTokens: 50000,
-      systemPromptPrefix:
-        "<thinking_mode>enabled</thinking_mode><max_thinking_length>50000</max_thinking_length>",
     });
 
     const prepared = adaptPiContextToKiroRequest({
@@ -370,9 +367,28 @@ describe("kiro request adapter", () => {
     });
 
     expect(prepared.thinkingConfig.enabled).toBe(true);
+    expect(prepared.payload.additionalModelRequestFields).toBeUndefined();
     expect(prepared.payload.conversationState.currentMessage.userInputMessage.content).toBe(
       "<thinking_mode>enabled</thinking_mode><max_thinking_length>16384</max_thinking_length>\nBe careful.\n\nSolve this carefully.",
     );
+
+    const maxPrepared = adaptPiContextToKiroRequest({
+      modelId: "claude-opus-4",
+      credentials,
+      reasoning: "xhigh",
+      context: {
+        messages: [{ role: "user", content: "Use max effort.", timestamp: 1 }],
+      },
+    });
+    expect(maxPrepared.requestMode).toBe("ide");
+    expect(maxPrepared.payload.additionalModelRequestFields).toEqual({
+      reasoning: { effort: "max" },
+    });
+    expect(maxPrepared.effectiveSystemPrompt).toBeUndefined();
+    expect(maxPrepared.payload.conversationState.currentMessage.userInputMessage.content).toBe(
+      "Use max effort.",
+    );
+    expect(JSON.stringify(maxPrepared.payload)).not.toContain("max_thinking_length");
   });
 
   it("uses stored region by default and profileArn region when provided", () => {
@@ -586,6 +602,7 @@ describe("kiro request adapter", () => {
       modelId: "claude-sonnet-4",
       credentials,
       conversationId: "cli-conv",
+      reasoning: "xhigh",
       context: {
         messages: [
           { role: "user", content: "Earlier question.", timestamp: 0 },
@@ -620,6 +637,13 @@ describe("kiro request adapter", () => {
 
     expect(prepared.requestMode).toBe("cli");
     expect(prepared.endpoint).toBe("https://runtime.us-west-2.kiro.dev/");
+    expect(prepared.payload).toMatchObject({
+      profileArn: undefined,
+      additionalModelRequestFields: {
+        reasoning: { effort: "max" },
+      },
+    });
+    expect(JSON.stringify(prepared.payload)).not.toContain("max_thinking_length");
     expect(prepared.payload.conversationState).toMatchObject({
       conversationId: "cli-conv",
       chatTriggerType: "MANUAL",

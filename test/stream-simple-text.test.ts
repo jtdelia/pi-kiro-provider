@@ -1,7 +1,10 @@
 import { EventStreamCodec } from "@smithy/eventstream-codec";
 import { describe, expect, it, vi } from "vitest";
 
-import { clearKiroProfileArnCache, createKiroProviderConfig } from "../extensions/kiro/index";
+import {
+  clearKiroProfileArnCache,
+  createKiroProviderConfig as createProviderConfig,
+} from "../extensions/kiro/index";
 import { KIRO_MAX_REQUEST_BODY_BYTES, serializeKiroPayload } from "../extensions/kiro/request";
 import type { KiroRequestPayload } from "../extensions/kiro/types";
 import { KIRO_CUSTOM_API, KIRO_PROVIDER_NAME } from "../extensions/kiro/types";
@@ -55,6 +58,12 @@ function requireStream<T>(stream: T | undefined): T {
   }
 
   return stream;
+}
+
+function createKiroProviderConfig(
+  dependencies: Parameters<typeof createProviderConfig>[0] = {},
+): ReturnType<typeof createProviderConfig> {
+  return createProviderConfig({ env: {}, ...dependencies });
 }
 
 describe("kiro streamSimple transport", () => {
@@ -165,6 +174,117 @@ describe("kiro streamSimple transport", () => {
       cacheWrite: 1,
       totalTokens: 16,
     });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("serializes text-only pi xhigh in IDE mode without a legacy marker", async () => {
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      expect(url).toBe("https://q.us-west-2.amazonaws.com/generateAssistantResponse");
+
+      const payload = JSON.parse(String(init?.body)) as KiroRequestPayload;
+      expect(payload.additionalModelRequestFields).toEqual({
+        reasoning: { effort: "max" },
+      });
+      expect(payload.conversationState.currentMessage.userInputMessage.content).toBe(
+        "Use maximum reasoning.",
+      );
+      expect(String(init?.body)).not.toContain("max_thinking_length");
+
+      return createEventStreamResponse([
+        createEventStreamMessage("assistantResponseEvent", { content: "done", modelId: "claude-opus-4" }),
+        createEventStreamMessage("messageDeltaEvent", { delta: { stop_reason: "end_turn" } }),
+      ]);
+    });
+
+    const provider = createKiroProviderConfig({
+      fetch: fetchMock as unknown as typeof fetch,
+      readAuthFile: async () =>
+        JSON.stringify({
+          kiro: {
+            type: "oauth",
+            access: "stored-access-token",
+            refresh: "refresh-token",
+            expires: Date.now() + 60_000,
+            authMode: "builder-id",
+            region: "us-west-2",
+            oidcRegion: "us-west-2",
+            clientId: "client-id",
+            clientSecret: "client-secret",
+          },
+        }),
+    });
+
+    const stream = provider.streamSimple?.(
+      { id: "claude-opus-4", api: KIRO_CUSTOM_API, provider: KIRO_PROVIDER_NAME } as never,
+      {
+        messages: [{ role: "user", content: "Use maximum reasoning.", timestamp: 1 }],
+      } as never,
+      { reasoning: "xhigh" },
+    );
+
+    const events = await collectStreamEvents(requireStream(stream));
+    expect(events.at(-1)).toMatchObject({ type: "done" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("serializes image pi xhigh in CLI mode without a legacy marker", async () => {
+    const profileArn = "arn:aws:codewhisperer:us-west-2:111122223333:profile/ABC";
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      expect(url).toBe("https://runtime.us-west-2.kiro.dev/");
+
+      const payload = JSON.parse(String(init?.body)) as KiroRequestPayload;
+      expect(payload).toMatchObject({
+        profileArn,
+        additionalModelRequestFields: {
+          reasoning: { effort: "max" },
+        },
+      });
+      expect(String(init?.body)).not.toContain("max_thinking_length");
+
+      return createEventStreamResponse([
+        createEventStreamMessage("assistantResponseEvent", { content: "done", modelId: "claude-opus-4" }),
+        createEventStreamMessage("messageDeltaEvent", { delta: { stop_reason: "end_turn" } }),
+      ]);
+    });
+
+    const provider = createKiroProviderConfig({
+      fetch: fetchMock as unknown as typeof fetch,
+      readAuthFile: async () =>
+        JSON.stringify({
+          kiro: {
+            type: "oauth",
+            access: "stored-access-token",
+            refresh: "refresh-token",
+            expires: Date.now() + 60_000,
+            authMode: "identity-center",
+            region: "us-west-2",
+            oidcRegion: "us-west-2",
+            clientId: "client-id",
+            clientSecret: "client-secret",
+            profileArn,
+          },
+        }),
+    });
+
+    const stream = provider.streamSimple?.(
+      { id: "claude-opus-4", api: KIRO_CUSTOM_API, provider: KIRO_PROVIDER_NAME } as never,
+      {
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "Use maximum reasoning." },
+              { type: "image", data: Buffer.from("png-bytes").toString("base64"), mimeType: "image/png" },
+            ],
+            timestamp: 1,
+          },
+        ],
+      } as never,
+      { reasoning: "xhigh" },
+    );
+
+    const events = await collectStreamEvents(requireStream(stream));
+    expect(events.at(-1)).toMatchObject({ type: "done" });
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 

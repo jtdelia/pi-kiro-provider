@@ -48,13 +48,11 @@ const KIRO_TRANSPORT_USER_AGENT_DETAIL = `aws-sdk-js/3.738.0 ua/2.1 lang/js api/
 const KIRO_CLI_TRANSPORT_USER_AGENT = "aws-sdk-rust/1.3.15 ua/2.1 api/codewhispererstreaming/0.1.17975 os/linux lang/rust/1.92.0 md/appVersion-2.18.1 app/AmazonQ-For-CLI";
 const KIRO_CLI_TRANSPORT_USER_AGENT_DETAIL = "aws-sdk-rust/1.3.15 ua/2.1 api/codewhispererstreaming/0.1.17975 os/linux lang/rust/1.92.0 m/F app/AmazonQ-For-CLI";
 
-const KIRO_THINKING_BUDGETS: Record<ThinkingLevel, number> = {
+const KIRO_THINKING_BUDGETS: Partial<Record<ThinkingLevel, number>> = {
   minimal: 1024,
   low: 4096,
   medium: 8192,
   high: 16384,
-  // Kiro's max effort mode uses the 50k legacy marker budget.
-  xhigh: 50000,
 };
 
 const KIRO_TRUNCATION_TOKEN = "... [TRUNCATED] ...";
@@ -300,6 +298,12 @@ export function mapThinkingLevelToKiroThinkingConfig(reasoning?: ThinkingLevel):
     return { enabled: false };
   }
 
+  // Max effort is a structured model request field. Do not combine it with the legacy
+  // max_thinking_length prompt marker used by the lower portable thinking levels.
+  if (reasoning === "xhigh") {
+    return { enabled: true, level: reasoning };
+  }
+
   const budgetTokens = KIRO_THINKING_BUDGETS[reasoning];
   if (budgetTokens === undefined) {
     throw new Error(`Unsupported Kiro thinking level: ${reasoning}`);
@@ -311,6 +315,13 @@ export function mapThinkingLevelToKiroThinkingConfig(reasoning?: ThinkingLevel):
     budgetTokens,
     systemPromptPrefix: `<thinking_mode>enabled</thinking_mode><max_thinking_length>${budgetTokens}</max_thinking_length>`,
   };
+}
+
+/** Kiro's structured max-effort control, supported across reasoning-capable models. */
+export function mapThinkingLevelToKiroAdditionalModelRequestFields(
+  reasoning?: ThinkingLevel,
+): KiroRequestPayload["additionalModelRequestFields"] | undefined {
+  return reasoning === "xhigh" ? { reasoning: { effort: "max" } } : undefined;
 }
 
 function combineThinkingAndTextContent(message: AssistantMessage): string {
@@ -1304,6 +1315,7 @@ function fitKiroPayloadToSize(input: {
   profileArn?: string;
   historyByteBudget: number;
   requestMode: KiroRequestMode;
+  reasoning?: ThinkingLevel;
 }): {
   payload: KiroRequestPayload;
   serialized: KiroSerializedPayload;
@@ -1337,6 +1349,7 @@ function fitKiroPayloadToSize(input: {
           currentMessage: { userInputMessage: currentMessage },
         },
         profileArn: input.profileArn,
+        additionalModelRequestFields: mapThinkingLevelToKiroAdditionalModelRequestFields(input.reasoning),
       },
       input.requestMode,
     );
@@ -1513,6 +1526,7 @@ export function adaptPiContextToKiroRequest(input: KiroRequestAdapterInput): Kir
     profileArn: input.credentials.profileArn,
     historyByteBudget,
     requestMode,
+    reasoning: input.reasoning,
   });
   const payload = fitted.payload;
   const endpoint = buildKiroRequestEndpoint(input.credentials, requestMode);

@@ -142,7 +142,7 @@ That means:
 - provider registration still works when discovery fails
 - the extension remains usable when the live catalog is unavailable
 
-The bundled catalog currently includes validated fallback entries across several model families, including Claude, MiniMax, GLM, and Qwen. Reasoning-capable models expose pi's `xhigh` level, which maps to Kiro's `max` effort mode and its 50,000-token legacy thinking marker budget.
+The bundled catalog currently includes validated fallback entries across several model families, including Claude, MiniMax, GLM, and Qwen. Reasoning-capable models expose pi's `xhigh` level, which maps to Kiro's structured `max` effort mode. Lower thinking levels continue to use Kiro's legacy prompt-budget markers.
 
 ## Troubleshooting
 

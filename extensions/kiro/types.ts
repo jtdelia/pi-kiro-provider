@@ -162,6 +162,11 @@ export interface KiroConversationState {
 export interface KiroRequestPayload {
   conversationState: KiroConversationState;
   profileArn?: string;
+  additionalModelRequestFields?: {
+    reasoning: {
+      effort: "max";
+    };
+  };
 }
 
 export interface KiroSerializedPayload {
