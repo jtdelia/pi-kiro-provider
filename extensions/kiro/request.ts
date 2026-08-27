@@ -91,18 +91,21 @@ export function getKiroHistoryByteBudget(contextWindow?: number): number {
   return Math.floor((contextWindow / 200_000) * 850_000);
 }
 
+export interface KiroRequestBudgetReductions {
+  prunedHistoryMessageCount: number;
+  removedHistoricalImageCount: number;
+  aggregateToolResultTruncationCount: number;
+  removedOptionalToolDefinitionCount: number;
+}
+
 export class KiroContextLengthExceededError extends Error {
   readonly utf8Bytes: number;
   readonly maxRequestBodyBytes: number;
+  readonly reductions?: KiroRequestBudgetReductions;
 
   constructor(input: {
     utf8Bytes: number;
-    reductions?: {
-      prunedHistoryMessageCount: number;
-      removedHistoricalImageCount: number;
-      aggregateToolResultTruncationCount: number;
-      removedOptionalToolDefinitionCount: number;
-    };
+    reductions?: KiroRequestBudgetReductions;
   }) {
     const reductions = input.reductions
       ? `; reductions: history=${input.reductions.prunedHistoryMessageCount}, historicalImages=${input.reductions.removedHistoricalImageCount}, aggregateToolResults=${input.reductions.aggregateToolResultTruncationCount}, optionalTools=${input.reductions.removedOptionalToolDefinitionCount}`
@@ -113,6 +116,7 @@ export class KiroContextLengthExceededError extends Error {
     this.name = "KiroContextLengthExceededError";
     this.utf8Bytes = input.utf8Bytes;
     this.maxRequestBodyBytes = KIRO_MAX_REQUEST_BODY_BYTES;
+    this.reductions = input.reductions;
   }
 }
 

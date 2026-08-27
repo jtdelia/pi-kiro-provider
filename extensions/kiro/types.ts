@@ -5,6 +5,7 @@ export const KIRO_CUSTOM_API = "kiro-api" as const;
 export const KIRO_DEFAULT_OIDC_REGION = "us-east-1" as const;
 export const KIRO_DEFAULT_SERVICE_REGION = "us-east-1" as const;
 export const KIRO_PROFILE_ARN_ENV_VAR = "KIRO_PROFILE_ARN" as const;
+export const KIRO_DEBUG_PAYLOAD_ENV_VAR = "KIRO_DEBUG_PAYLOAD" as const;
 export const KIRO_CONFIG_FILE_NAME = "kiro.json" as const;
 
 export const KIRO_AUTH_MODES = {

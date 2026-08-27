@@ -7,8 +7,15 @@ import { describe, expect, it, vi } from "vitest";
 import { createKiroLogin } from "../extensions/kiro/auth";
 import { createKiroProviderConfig } from "../extensions/kiro/index";
 import { logKiroError, logKiroInfo } from "../extensions/kiro/logging";
+import { KIRO_MAX_REQUEST_BODY_BYTES } from "../extensions/kiro/request";
 import { createKiroRefreshToken } from "../extensions/kiro/refresh";
-import { KIRO_AUTH_MODES, KIRO_CUSTOM_API, KIRO_PROVIDER_NAME, type KiroOAuthCredentials } from "../extensions/kiro/types";
+import {
+  KIRO_AUTH_MODES,
+  KIRO_CUSTOM_API,
+  KIRO_PROVIDER_NAME,
+  type KiroOAuthCredentials,
+  type KiroRequestPayload,
+} from "../extensions/kiro/types";
 
 async function createTempLogPath(): Promise<{ logPath: string; cleanup: () => Promise<void> }> {
   const dir = await mkdtemp(join(tmpdir(), "kiro-log-test-"));
@@ -290,6 +297,142 @@ describe("kiro logging", () => {
         },
       });
       expect(entries[1]?.event).toBe("request_error");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("logs local callback overflows with safe numeric budget diagnostics", async () => {
+    const { logPath, cleanup } = await createTempLogPath();
+
+    try {
+      const fetchMock = vi.fn(async () => new Response("unexpected fetch", { status: 500 }));
+      const provider = createKiroProviderConfig({
+        env: {},
+        logPath,
+        fetch: fetchMock as unknown as typeof fetch,
+        readAuthFile: async () =>
+          JSON.stringify({
+            kiro: {
+              type: "oauth",
+              access: "stored-access-token",
+              refresh: "refresh-token",
+              expires: Date.now() + 60_000,
+              authMode: "builder-id",
+              region: "us-west-2",
+              oidcRegion: "us-west-2",
+              clientId: "client-id",
+              clientSecret: "client-secret",
+            },
+          }),
+      });
+
+      const stream = provider.streamSimple?.(
+        { id: "claude-sonnet-4", api: KIRO_CUSTOM_API, provider: KIRO_PROVIDER_NAME } as never,
+        { messages: [{ role: "user", content: "hello", timestamp: 1 }] } as never,
+        {
+          onPayload: async (payload: KiroRequestPayload) => ({
+            ...payload,
+            conversationState: {
+              ...payload.conversationState,
+              currentMessage: {
+                userInputMessage: {
+                  ...payload.conversationState.currentMessage.userInputMessage,
+                  content: `callback-secret-${"x".repeat(KIRO_MAX_REQUEST_BODY_BYTES)}`,
+                },
+              },
+            },
+          }),
+        } as never,
+      );
+
+      const events = await collectStreamEvents(requireStream(stream));
+      expect((events.at(-1) as { type: string }).type).toBe("error");
+      expect(fetchMock).not.toHaveBeenCalled();
+
+      const entries = await readLogEntries(logPath);
+      expect(entries).toHaveLength(2);
+      expect(entries[0]).toMatchObject({
+        level: "info",
+        event: "request_budget_exceeded",
+        context: {
+          modelId: "claude-sonnet-4",
+          provider: KIRO_PROVIDER_NAME,
+          api: KIRO_CUSTOM_API,
+          source: "client",
+          measuredAfterCallback: true,
+          maxRequestBodyBytes: KIRO_MAX_REQUEST_BODY_BYTES,
+          reductions: {
+            prunedHistoryMessageCount: expect.any(Number),
+            removedHistoricalImageCount: expect.any(Number),
+            aggregateToolResultTruncationCount: expect.any(Number),
+            removedOptionalToolDefinitionCount: expect.any(Number),
+          },
+        },
+      });
+      expect(JSON.stringify(entries)).not.toContain("callback-secret");
+      expect(JSON.stringify(entries)).not.toContain("stored-access-token");
+      expect(JSON.stringify(entries)).not.toContain("refresh-token");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("logs confirmed server overflows separately from generic request errors", async () => {
+    const { logPath, cleanup } = await createTempLogPath();
+
+    try {
+      const provider = createKiroProviderConfig({
+        env: {},
+        logPath,
+        fetch: vi.fn(async () =>
+          new Response("CONTENT_LENGTH_EXCEEDS_THRESHOLD authorization=Bearer server-secret", { status: 400 }),
+        ) as unknown as typeof fetch,
+        readAuthFile: async () =>
+          JSON.stringify({
+            kiro: {
+              type: "oauth",
+              access: "stored-access-token",
+              refresh: "refresh-token",
+              expires: Date.now() + 60_000,
+              authMode: "builder-id",
+              region: "us-west-2",
+              oidcRegion: "us-west-2",
+              clientId: "client-id",
+              clientSecret: "client-secret",
+            },
+          }),
+      });
+
+      const stream = provider.streamSimple?.(
+        { id: "claude-sonnet-4", api: KIRO_CUSTOM_API, provider: KIRO_PROVIDER_NAME } as never,
+        { messages: [{ role: "user", content: "hello", timestamp: 1 }] } as never,
+      );
+
+      const events = await collectStreamEvents(requireStream(stream));
+      expect((events.at(-1) as { type: string }).type).toBe("error");
+
+      const entries = await readLogEntries(logPath);
+      expect(entries).toHaveLength(2);
+      expect(entries[0]).toMatchObject({
+        level: "info",
+        event: "request_budget_exceeded",
+        context: {
+          source: "server",
+          responseStatus: 400,
+          maxRequestBodyBytes: KIRO_MAX_REQUEST_BODY_BYTES,
+          reductions: {
+            prunedHistoryMessageCount: expect.any(Number),
+            removedHistoricalImageCount: expect.any(Number),
+            aggregateToolResultTruncationCount: expect.any(Number),
+            removedOptionalToolDefinitionCount: expect.any(Number),
+          },
+        },
+      });
+      expect(entries[1]?.event).toBe("request_error");
+      expect(JSON.stringify(entries)).not.toContain("server-secret");
+      expect(JSON.stringify(entries)).not.toContain("stored-access-token");
+      expect(JSON.stringify(entries)).not.toContain("refresh-token");
     } finally {
       await cleanup();
     }

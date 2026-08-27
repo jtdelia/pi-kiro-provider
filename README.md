@@ -101,6 +101,22 @@ export KIRO_DEBUG_STREAM_EVENTS=1
 
 The diagnostic log records only the decoded event type, nested field keys, and numeric fields. It does not record content, tool arguments, credentials, or response bodies. Entries are written to the normal Kiro log (`~/.pi/agent/kiro.log` unless configured otherwise).
 
+For opt-in final-request payload diagnostics, enable the separate redacted JSONL log for one command:
+
+```bash
+KIRO_DEBUG_PAYLOAD=1 pi
+```
+
+Or enable it for the current shell session:
+
+```bash
+export KIRO_DEBUG_PAYLOAD=true
+```
+
+Disable it with `unset KIRO_DEBUG_PAYLOAD`. Missing, empty, `0`, and `false` values disable payload logging; `1` and case-insensitive `true` enable it. Entries are appended to `~/.pi/agent/kiro-payload.log`.
+
+Payload logging is deliberately opt-in because it writes one diagnostic record per model request. The dedicated structural redactor keeps request shape and safe metadata such as model IDs, request mode, image formats/counts, statuses, and byte measurements, while replacing prompts, tool arguments/results, tool descriptions and schema values, reasoning content/signatures, image bytes, working-directory paths, profile/account identifiers, and credential-like values with redaction markers or lengths. It never records request headers or `RequestInit`, including Authorization. Redaction does not mutate or alter the payload sent to Kiro.
+
 ## Enterprise `profileArn` setup
 
 Some IAM Identity Center environments need a `profileArn` for Q Developer or CodeWhisperer-backed requests.
