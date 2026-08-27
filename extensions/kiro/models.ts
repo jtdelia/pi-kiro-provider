@@ -190,9 +190,8 @@ export function deriveThinkingLevelMap(
     return { ...model.thinkingLevelMap };
   }
 
-  // Kiro's adapter supports the existing 32,768-token xhigh budget.
-  // Do not advertise max until Kiro documents a corresponding budget.
-  return { xhigh: "xhigh" };
+  // pi exposes xhigh as its highest portable level; Kiro's equivalent is max.
+  return { xhigh: "max" };
 }
 
 export function deriveInputModalities(model: KiroCatalogModelDefinition): KiroInputModality[] {

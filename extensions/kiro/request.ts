@@ -53,7 +53,8 @@ const KIRO_THINKING_BUDGETS: Record<ThinkingLevel, number> = {
   low: 4096,
   medium: 8192,
   high: 16384,
-  xhigh: 32768,
+  // Kiro's max effort mode uses the 50k legacy marker budget.
+  xhigh: 50000,
 };
 
 const KIRO_TRUNCATION_TOKEN = "... [TRUNCATED] ...";

@@ -38,7 +38,7 @@ pi -e git:github.com/jtdelia/pi-kiro-provider
 
 ## Compatibility
 
-This extension targets the latest pi release. Its model-level `thinkingLevelMap` support requires pi 0.72 or newer; current pi releases support the `xhigh` capability advertised by this provider. The extension intentionally does not advertise `max` because Kiro's corresponding budget and semantics are not confirmed.
+This extension targets the latest pi release. Its model-level `thinkingLevelMap` support requires pi 0.72 or newer; current pi releases support the `xhigh` capability advertised by this provider. The provider maps pi's `xhigh` level to Kiro's `max` effort mode.
 
 ## Quick start
 
@@ -142,7 +142,7 @@ That means:
 - provider registration still works when discovery fails
 - the extension remains usable when the live catalog is unavailable
 
-The bundled catalog currently includes validated fallback entries across several model families, including Claude, MiniMax, GLM, and Qwen. Reasoning-capable models expose the `xhigh` level, which maps to Kiro's existing 32,768-token thinking budget. `max` is not advertised because the Kiro-side budget and semantics have not been confirmed.
+The bundled catalog currently includes validated fallback entries across several model families, including Claude, MiniMax, GLM, and Qwen. Reasoning-capable models expose pi's `xhigh` level, which maps to Kiro's `max` effort mode and its 50,000-token legacy thinking marker budget.
 
 ## Troubleshooting
 
