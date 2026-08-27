@@ -185,6 +185,24 @@ describe("Kiro payload debug logging", () => {
     });
   });
 
+  it("redacts every supported structured reasoning effort without dropping it", () => {
+    for (const effort of ["low", "medium", "high", "xhigh", "max"] as const) {
+      const redacted = redactKiroPayload({
+        additionalModelRequestFields: { reasoning: { effort } },
+        conversationState: {
+          chatTriggerType: "MANUAL",
+          currentMessage: {
+            userInputMessage: { content: "prompt", modelId: "gpt-5.6-luna", origin: "AI_EDITOR" },
+          },
+        },
+      });
+
+      expect(redacted).toMatchObject({
+        additionalModelRequestFields: { reasoning: { effort } },
+      });
+    }
+  });
+
   it("writes payload entries to the separate payload log", async () => {
     const appendLogFile = vi.fn(async (...args: [string, string]) => {
       void args;

@@ -15,6 +15,7 @@ import {
   convertPiToolDefinitions,
   convertToolResultMessageToKiroMessage,
   mapNodePlatformToKiroOperatingSystem,
+  mapThinkingLevelToKiroAdditionalModelRequestFields,
   mapThinkingLevelToKiroThinkingConfig,
   serializeKiroPayload,
 } from "../extensions/kiro/request";
@@ -336,59 +337,59 @@ describe("kiro request adapter", () => {
     });
   });
 
-  it("maps thinking levels to the expected config and request fields", () => {
-    expect(mapThinkingLevelToKiroThinkingConfig("high")).toEqual({
-      enabled: true,
-      level: "high",
-      budgetTokens: 16384,
-      systemPromptPrefix:
-        "<thinking_mode>enabled</thinking_mode><max_thinking_length>16384</max_thinking_length>",
-    });
+  it("maps every Pi thinking level to Kiro's structured effort field", () => {
+    const mappings = [
+      { pi: "minimal" as const, kiro: "low" as const },
+      { pi: "low" as const, kiro: "medium" as const },
+      { pi: "medium" as const, kiro: "high" as const },
+      { pi: "high" as const, kiro: "xhigh" as const },
+      { pi: "xhigh" as const, kiro: "max" as const },
+    ];
 
-    expect(mapThinkingLevelToKiroThinkingConfig("xhigh")).toEqual({
-      enabled: true,
-      level: "xhigh",
-    });
+    expect(mapThinkingLevelToKiroThinkingConfig()).toEqual({ enabled: false });
+    expect(mapThinkingLevelToKiroAdditionalModelRequestFields()).toBeUndefined();
 
-    const prepared = adaptPiContextToKiroRequest({
-      modelId: "claude-sonnet-4",
+    for (const { pi, kiro } of mappings) {
+      expect(mapThinkingLevelToKiroThinkingConfig(pi)).toEqual({
+        enabled: true,
+        level: pi,
+      });
+      expect(mapThinkingLevelToKiroAdditionalModelRequestFields(pi)).toEqual({
+        reasoning: { effort: kiro },
+      });
+
+      const prepared = adaptPiContextToKiroRequest({
+        modelId: "gpt-5.6-luna",
+        credentials,
+        reasoning: pi,
+        context: {
+          systemPrompt: "Be careful.",
+          messages: [{ role: "user", content: "Solve this carefully.", timestamp: 1 }],
+        },
+      });
+
+      expect(prepared.requestMode).toBe("ide");
+      expect(prepared.effectiveSystemPrompt).toBe("Be careful.");
+      expect(prepared.payload.additionalModelRequestFields).toEqual({
+        reasoning: { effort: kiro },
+      });
+      expect(prepared.payload.conversationState.currentMessage.userInputMessage.content).toBe(
+        "Be careful.\n\nSolve this carefully.",
+      );
+      expect(JSON.stringify(prepared.payload)).not.toContain("max_thinking_length");
+    }
+
+    const unreasoned = adaptPiContextToKiroRequest({
+      modelId: "gpt-5.6-luna",
       credentials,
-      reasoning: "high",
       context: {
-        systemPrompt: "Be careful.",
-        messages: [
-          {
-            role: "user",
-            content: "Solve this carefully.",
-            timestamp: 1,
-          },
-        ],
+        messages: [{ role: "user", content: "No extra reasoning.", timestamp: 1 }],
       },
     });
-
-    expect(prepared.thinkingConfig.enabled).toBe(true);
-    expect(prepared.payload.additionalModelRequestFields).toBeUndefined();
-    expect(prepared.payload.conversationState.currentMessage.userInputMessage.content).toBe(
-      "<thinking_mode>enabled</thinking_mode><max_thinking_length>16384</max_thinking_length>\nBe careful.\n\nSolve this carefully.",
+    expect(unreasoned.payload.additionalModelRequestFields).toBeUndefined();
+    expect(unreasoned.payload.conversationState.currentMessage.userInputMessage.content).toBe(
+      "No extra reasoning.",
     );
-
-    const maxPrepared = adaptPiContextToKiroRequest({
-      modelId: "claude-opus-4",
-      credentials,
-      reasoning: "xhigh",
-      context: {
-        messages: [{ role: "user", content: "Use max effort.", timestamp: 1 }],
-      },
-    });
-    expect(maxPrepared.requestMode).toBe("ide");
-    expect(maxPrepared.payload.additionalModelRequestFields).toEqual({
-      reasoning: { effort: "max" },
-    });
-    expect(maxPrepared.effectiveSystemPrompt).toBeUndefined();
-    expect(maxPrepared.payload.conversationState.currentMessage.userInputMessage.content).toBe(
-      "Use max effort.",
-    );
-    expect(JSON.stringify(maxPrepared.payload)).not.toContain("max_thinking_length");
   });
 
   it("uses stored region by default and profileArn region when provided", () => {

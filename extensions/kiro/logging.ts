@@ -487,8 +487,9 @@ export function redactKiroPayload(payload: unknown): unknown {
     const additionalFields: Record<string, unknown> = {};
     if (isRecord(payload.additionalModelRequestFields.reasoning)) {
       const reasoning: Record<string, unknown> = {};
-      if (payload.additionalModelRequestFields.reasoning.effort === "max") {
-        reasoning.effort = "max";
+      const effort = payload.additionalModelRequestFields.reasoning.effort;
+      if (effort === "low" || effort === "medium" || effort === "high" || effort === "xhigh" || effort === "max") {
+        reasoning.effort = effort;
       }
       additionalFields.reasoning = reasoning;
     }

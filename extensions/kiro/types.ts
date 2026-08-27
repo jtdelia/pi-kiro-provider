@@ -160,12 +160,14 @@ export interface KiroConversationState {
   };
 }
 
+export type KiroReasoningEffort = "low" | "medium" | "high" | "xhigh" | "max";
+
 export interface KiroRequestPayload {
   conversationState: KiroConversationState;
   profileArn?: string;
   additionalModelRequestFields?: {
     reasoning: {
-      effort: "max";
+      effort: KiroReasoningEffort;
     };
   };
 }
@@ -178,8 +180,6 @@ export interface KiroSerializedPayload {
 export interface KiroThinkingConfig {
   enabled: boolean;
   level?: ThinkingLevel;
-  budgetTokens?: number;
-  systemPromptPrefix?: string;
 }
 
 export type KiroRequestMode = "ide" | "cli";

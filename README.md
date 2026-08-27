@@ -19,7 +19,7 @@ It adds a `kiro` provider to pi, integrates with `/login`, supports AWS Builder 
 - Streams text responses through a custom pi provider adapter
 - Supports tool calls
 - Supports manual `profileArn` configuration for enterprise IAM Identity Center setups
-- Exposes `xhigh` thinking for reasoning-capable Kiro models
+- Exposes all Pi thinking levels for reasoning-capable Kiro models
 - Persists API-reported Kiro token usage in pi session records when the response includes it
 
 ## Install
@@ -38,7 +38,7 @@ pi -e git:github.com/jtdelia/pi-kiro-provider
 
 ## Compatibility
 
-This extension targets the latest pi release. Its model-level `thinkingLevelMap` support requires pi 0.72 or newer; current pi releases support the `xhigh` capability advertised by this provider. The provider maps pi's `xhigh` level to Kiro's `max` effort mode.
+This extension targets the latest pi release. Its model-level `thinkingLevelMap` support requires pi 0.72 or newer. Reasoning-capable Kiro models expose the full Pi thinking scale; the provider maps `minimal` → `low`, `low` → `medium`, `medium` → `high`, `high` → `xhigh`, and `xhigh` → `max` in Kiro's structured effort field.
 
 ## Quick start
 
@@ -158,7 +158,7 @@ That means:
 - provider registration still works when discovery fails
 - the extension remains usable when the live catalog is unavailable
 
-The bundled catalog currently includes validated fallback entries across several model families, including Claude, MiniMax, GLM, and Qwen. Reasoning-capable models expose pi's `xhigh` level, which maps to Kiro's structured `max` effort mode. Lower thinking levels continue to use Kiro's legacy prompt-budget markers.
+The bundled catalog currently includes validated fallback entries across several model families, including Claude, MiniMax, GLM, and Qwen. Reasoning-capable models expose Pi's full thinking scale and send Kiro's structured effort values using the provider mapping documented above. With no Pi reasoning level selected, the structured reasoning field is omitted.
 
 ## Troubleshooting
 

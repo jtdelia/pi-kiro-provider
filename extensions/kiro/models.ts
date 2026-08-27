@@ -190,8 +190,14 @@ export function deriveThinkingLevelMap(
     return { ...model.thinkingLevelMap };
   }
 
-  // pi exposes xhigh as its highest portable level; Kiro's equivalent is max.
-  return { xhigh: "max" };
+  // Kiro's structured effort scale is one level above Pi's portable scale.
+  return {
+    minimal: "low",
+    low: "medium",
+    medium: "high",
+    high: "xhigh",
+    xhigh: "max",
+  };
 }
 
 export function deriveInputModalities(model: KiroCatalogModelDefinition): KiroInputModality[] {
