@@ -38,7 +38,22 @@ pi -e git:github.com/jtdelia/pi-kiro-provider
 
 ## Compatibility
 
-This extension targets the latest pi release. Its model-level `thinkingLevelMap` support requires pi 0.72 or newer. Reasoning-capable Kiro models expose the full Pi thinking scale; the provider maps `minimal` → `low`, `low` → `medium`, `medium` → `high`, `high` → `xhigh`, and `xhigh` → `max` in Kiro's structured effort field.
+This extension targets the latest pi release. Its model-level `thinkingLevelMap` support requires pi 0.72 or newer. Reasoning-capable Kiro models expose the full Pi thinking scale and send the selected level through Kiro's structured reasoning field.
+
+### Pi-to-Kiro effort mapping
+
+The provider keeps pi's native thinking controls and maps them to `additionalModelRequestFields.reasoning.effort` for reasoning-capable Kiro models:
+
+| Pi thinking level | Kiro effort | Request behavior |
+| --- | --- | --- |
+| Off / unset | — | Omits `additionalModelRequestFields.reasoning` |
+| `minimal` | `low` | Sends `{ reasoning: { effort: "low" } }` |
+| `low` | `medium` | Sends `{ reasoning: { effort: "medium" } }` |
+| `medium` | `high` | Sends `{ reasoning: { effort: "high" } }` |
+| `high` | `xhigh` | Sends `{ reasoning: { effort: "xhigh" } }` |
+| `xhigh` | `max` | Sends `{ reasoning: { effort: "max" } }` |
+
+These values are sent as structured request fields; the adapter does not inject legacy thinking-budget markers into the prompt.
 
 ## Quick start
 
